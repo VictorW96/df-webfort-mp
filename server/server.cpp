@@ -40,9 +40,13 @@ conn_map clients;
 
 #include "MemAccess.h"
 #include "Console.h"
+#include "Core.h"
+#include "DFHackVersion.h"
 #include "modules/World.h"
 #include "df/global_objects.h"
 #include "df/graphic.h"
+#include <filesystem>
+#include <fstream>
 using df::global::gps;
 
 
@@ -237,14 +241,62 @@ std::string status_json()
 void on_http(server* s, conn_hdl hdl)
 {
     server::connection_ptr con = s->get_con_from_hdl(hdl);
-    std::stringstream output;
     std::string route = con->get_resource();
+    con->replace_header("Access-Control-Allow-Origin", "*");
+
     if (route == STATUS_ROUTE) {
         con->set_status(websocketpp::http::status_code::ok);
         con->replace_header("Content-Type", "application/json");
-        con->replace_header("Access-Control-Allow-Origin", "*");
         con->set_body(status_json());
+        return;
     }
+
+    // Serve static files from <hack>/webfort/static/.
+    std::filesystem::path static_root =
+        DFHack::Core::getInstance().getHackPath() / "webfort" / "static";
+    std::string path = route;
+    // Strip query string.
+    auto q = path.find('?');
+    if (q != std::string::npos) path.resize(q);
+    if (path == "/" || path.empty()) path = "/webfort.html";
+
+    // Prevent path traversal.
+    if (path.find("..") != std::string::npos) {
+        con->set_status(websocketpp::http::status_code::bad_request);
+        con->set_body("Bad request");
+        return;
+    }
+
+    std::filesystem::path file = static_root;
+    file += path; // path starts with '/'
+
+    std::error_code fec;
+    if (!std::filesystem::is_regular_file(file, fec)) {
+        con->set_status(websocketpp::http::status_code::not_found);
+        con->set_body("Not found: " + path + "\n(served from " + static_root.string() + ")");
+        return;
+    }
+
+    std::ifstream ifs(file, std::ios::binary);
+    std::stringstream body;
+    body << ifs.rdbuf();
+
+    // Minimal content-type guessing.
+    std::string ext = file.extension().string();
+    std::string ctype = "application/octet-stream";
+    if (ext == ".html")      ctype = "text/html; charset=utf-8";
+    else if (ext == ".js")   ctype = "application/javascript";
+    else if (ext == ".css")  ctype = "text/css";
+    else if (ext == ".json") ctype = "application/json";
+    else if (ext == ".png")  ctype = "image/png";
+    else if (ext == ".ico")  ctype = "image/x-icon";
+    else if (ext == ".svg")  ctype = "image/svg+xml";
+    else if (ext == ".ttf")  ctype = "font/ttf";
+    else if (ext == ".woff") ctype = "font/woff";
+
+    con->set_status(websocketpp::http::status_code::ok);
+    con->replace_header("Content-Type", ctype);
+    con->set_body(body.str());
 }
 
 bool validate_open(server* s, conn_hdl hdl)
@@ -308,7 +360,7 @@ void on_close(server* s, conn_hdl c)
     clients.erase(c);
 }
 
-static unsigned char buf[64*1024];
+static unsigned char buf[1024*1024];
 void tock(server* s, conn_hdl hdl)
 {
     Client* cl = get_client(hdl);
@@ -324,6 +376,7 @@ void tock(server* s, conn_hdl hdl)
     }
 
     unsigned char *b = buf;
+    unsigned char * const buf_end = buf + sizeof(buf);
     // [0] msgtype
     *(b++) = 110;
 
@@ -364,7 +417,8 @@ void tock(server* s, conn_hdl hdl)
             unsigned char *s = sc + tile*4;
             if (mod[tile])
                 continue;
-
+            if (b + 5 > buf_end)
+                break; // packet full; remaining tiles will be sent next tock
             *(b++) = x;
             *(b++) = y;
             *(b++) = s[0];
@@ -385,6 +439,7 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
     auto str = msg->get_payload();
     const unsigned char *mdata = (const unsigned char*) str.c_str();
     int msz = str.size();
+    { FILE* f = fopen("/tmp/webfort.log", "a"); if (f) { fprintf(f, "[webfort] on_message op=%d sz=%d\n", msz>0?mdata[0]:-1, msz); fclose(f); } }
 
     if (mdata[0] == 112 && msz == 3) { // ResizeEvent
         if (hdl == active_conn) {
@@ -393,43 +448,48 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
             needsresize = true;
         }
     } else if (mdata[0] == 111 && msz == 4) { // KeyEvent
-        if (hdl == active_conn) {
-            Client* cl = get_client(hdl);
-            SDL::Key k = mdata[2] ? (SDL::Key)mdata[2] : mapInputCodeToSDL(mdata[1]);
-            bool is_safe_key = cl->is_admin ||
-                k != SDL::K_ESCAPE ||
-                is_safe_to_escape();
-            if (k != SDL::K_UNKNOWN && is_safe_key) {
-                int jsmods = mdata[3];
-                int sdlmods = 0;
+        // Phase 3+: always forward input from any connected client. The
+        // legacy "active player" gate was a shared-seat mechanism; for the
+        // single-user port it's a hindrance.
+        Client* cl = get_client(hdl);
+        SDL::Key k = mdata[2] ? (SDL::Key)mdata[2] : mapInputCodeToSDL(mdata[1]);
+        { FILE* f = fopen("/tmp/webfort.log", "a"); if (f) { fprintf(f, "[webfort] recv KeyEvent kc=%d cc=%d mod=%d -> sym=%d\n", mdata[1], mdata[2], mdata[3], (int)k); fclose(f); } }
+        bool is_safe_key = (cl && cl->is_admin) ||
+            k != SDL::K_ESCAPE ||
+            is_safe_to_escape();
+        if (k != SDL::K_UNKNOWN && is_safe_key) {
+            int jsmods = mdata[3];
+            int sdlmods = 0;
 
-                if (jsmods & 1) {
-                    simkey(1, 0, SDL::K_LALT, 0);
-                    sdlmods |= SDL::KMOD_ALT;
-                }
-                if (jsmods & 2) {
-                    simkey(1, 0, SDL::K_LSHIFT, 0);
-                    sdlmods |= SDL::KMOD_SHIFT;
-                }
-                if (jsmods & 4) {
-                    simkey(1, 0, SDL::K_LCTRL, 0);
-                    sdlmods |= SDL::KMOD_CTRL;
-                }
+            if (jsmods & 1) {
+                simkey(1, 0, SDL::K_LALT, 0);
+                sdlmods |= SDL::KMOD_ALT;
+            }
+            if (jsmods & 2) {
+                simkey(1, 0, SDL::K_LSHIFT, 0);
+                sdlmods |= SDL::KMOD_SHIFT;
+            }
+            if (jsmods & 4) {
+                simkey(1, 0, SDL::K_LCTRL, 0);
+                sdlmods |= SDL::KMOD_CTRL;
+            }
 
-                simkey(1, sdlmods, k, mdata[2]);
-                simkey(0, sdlmods, k, mdata[2]);
+            simkey(1, sdlmods, k, mdata[2]);
+            simkey(0, sdlmods, k, mdata[2]);
 
-                if (jsmods & 1) {
-                    simkey(0, 0, SDL::K_LALT, 0);
-                }
-                if (jsmods & 2) {
-                    simkey(0, 0, SDL::K_LSHIFT, 0);
-                }
-                if (jsmods & 4) {
-                    simkey(0, 0, SDL::K_LCTRL, 0);
-                }
+            if (jsmods & 1) {
+                simkey(0, 0, SDL::K_LALT, 0);
+            }
+            if (jsmods & 2) {
+                simkey(0, 0, SDL::K_LSHIFT, 0);
+            }
+            if (jsmods & 4) {
+                simkey(0, 0, SDL::K_LCTRL, 0);
             }
         }
+    } else if (mdata[0] == 113 && msz == 5) { // MouseEvent
+        // [113, tile_x, tile_y, button, type]
+        simmouse(mdata[1], mdata[2], mdata[3], (WFMouseType)mdata[4]);
     } else if (mdata[0] == 115) { // refreshScreen
         Client* cl = get_client(hdl);
         memset(cl->mod, 0, sizeof(cl->mod));
@@ -468,7 +528,7 @@ void wsloop(void *a_srv)
 }
 
 struct WFServerImpl {
-    tthread::thread* loop;
+    std::thread* loop;
     server srv;
     WFServerImpl(DFHack::color_ostream&);
     ~WFServerImpl();
@@ -478,6 +538,7 @@ struct WFServerImpl {
 
 WFServerImpl::WFServerImpl(DFHack::color_ostream& i_raw_out)
 {
+    loop = nullptr;
     null_client = new Client;
     null_client->nick = "__NOBODY";
 
@@ -496,53 +557,82 @@ WFServerImpl::~WFServerImpl()
 void WFServerImpl::start()
 {
     load_config();
+    const char* stage = "";
     try {
+        stage = "clear_access_channels";
         srv.clear_access_channels(ws::log::alevel::all);
+        stage = "set_access_channels";
         srv.set_access_channels(
                 ws::log::alevel::connect    |
                 ws::log::alevel::disconnect |
                 ws::log::alevel::app
         );
+        stage = "set_error_channels";
         srv.set_error_channels(
                 ws::log::elevel::info   |
                 ws::log::elevel::warn   |
                 ws::log::elevel::rerror |
                 ws::log::elevel::fatal
         );
+        stage = "init_asio";
         srv.init_asio();
 
+        stage = "set_alog_ostream";
         srv.get_alog().set_ostream(logstream);
 
-        srv.set_socket_init_handler(&on_init);
+        stage = "set_handlers";
+        // Note: socket_init_handler is invoked during connection init_asio
+        // (before the socket is opened) in websocketpp >= 0.8, so we cannot
+        // call set_option(no_delay) here. Skip on_init registration.
         srv.set_http_handler(bind(&on_http, &srv, ::_1));
         srv.set_validate_handler(bind(&validate_open, &srv, ::_1));
         srv.set_open_handler(bind(&on_open, &srv, ::_1));
         srv.set_message_handler(bind(&on_message, &srv, ::_1, ::_2));
         srv.set_close_handler(bind(&on_close, &srv, ::_1));
 
+        stage = "set_reuse_addr";
+        srv.set_reuse_addr(true);
+
+        stage = "listen";
         lib::error_code ec;
         srv.listen(PORT, ec);
         if (ec) {
-            *out << "ERROR: Unable to start Webfort on port " << PORT
-                  << ", is it being used somehere else?" << std::endl;
-            return;
+            *out << "ERROR: Unable to listen on port " << PORT
+                 << " (v6): " << ec.message() << " - retrying on v4" << std::endl;
+            ec.clear();
+            srv.listen(boost::asio::ip::tcp::v4(), PORT, ec);
+            if (ec) {
+                *out << "ERROR: Unable to start Webfort on port " << PORT
+                     << " (v4 also failed): " << ec.message() << std::endl;
+                return;
+            }
         }
 
+        stage = "start_accept";
         srv.start_accept();
         *out << "Web Fortress started on port " << PORT << std::endl;
     } catch (const std::exception & e) {
-        *out << "Webfort failed to start: " << e.what() << std::endl;
+        *out << "Webfort failed to start during '" << stage << "': " << e.what() << std::endl;
+        return;
     } catch (lib::error_code e) {
-        *out << "Webfort failed to start: " << e.message() << std::endl;
+        *out << "Webfort failed to start during '" << stage << "': " << e.message() << std::endl;
+        return;
     } catch (...) {
-        *out << "Webfort failed to start: other exception" << std::endl;
+        *out << "Webfort failed to start during '" << stage << "': other exception" << std::endl;
+        return;
     }
-    loop = new tthread::thread(wsloop, &srv);
+    loop = new std::thread(wsloop, &srv);
 }
 
 void WFServerImpl::stop()
 {
     srv.stop();
+    if (loop) {
+        if (loop->joinable())
+            loop->join();
+        delete loop;
+        loop = nullptr;
+    }
 }
 
 WFServer::WFServer(DFHack::color_ostream& o) { impl = new WFServerImpl(o); }

@@ -46,12 +46,15 @@ var lastFrame = 0;
 var tilewh = 16; // TODO: remove vars
 var tilew  = 16;
 var tileh  = 16;
+var dimx   = 80;
+var dimy   = 25;
 
 var cmd = {
-	"update":  110,
-	"sendKey": 111,
-	"connect": 115,
-	"requestTurn": 116
+	"update":       110,
+	"sendKey":      111,
+	"sendMouse":    113,
+	"connect":      115,
+	"requestTurn":  116
 };
 
 // Converts integer value in seconds to a time string, HH:MM:SS
@@ -244,6 +247,20 @@ function onMessage(evt) {
 		// FIXME: we shouldn't need resize data
 		var neww = data[7] * tilew;
 		var newh = data[8] * tileh;
+		var newDimx = data[7];
+		var newDimy = data[8];
+		if (newDimx > 0) { dimx = newDimx; dimy = newDimy; }
+
+		// Resize canvas to match the reported DF screen dimensions.
+		// Modern DF (Steam release) uses grids much larger than the old
+		// 80x25 default, so the hardcoded canvas size in HTML would clip.
+		if (neww > 0 && newh > 0 &&
+		    (canvas.width !== neww || canvas.height !== newh)) {
+			canvas.width  = neww;
+			canvas.height = newh;
+			lastConstraint = null;   // force CSS fit recompute below
+			fitCanvasToParent();
+		}
 
 		var nickSize = data[9];
 		// this only works because we know the input is uri-encoded ascii
@@ -284,7 +301,14 @@ function colorize(img, cnv) {
 			var pixels = idata.data;
 
 			for (var u = 0, len = pixels.length; u < len; u += 4) {
-				pixels[u] = pixels[u] * (colors[c * 3 + 0] / 255);
+				// DF's curses_* tilesheets use magenta (255,0,255) as the
+				// transparent color-key (classic bitmap convention, no
+				// alpha channel). Strip it before tinting.
+				if (pixels[u] === 255 && pixels[u + 1] === 0 && pixels[u + 2] === 255) {
+					pixels[u + 3] = 0;
+					continue;
+				}
+				pixels[u]     = pixels[u]     * (colors[c * 3 + 0] / 255);
 				pixels[u + 1] = pixels[u + 1] * (colors[c * 3 + 1] / 255);
 				pixels[u + 2] = pixels[u + 2] * (colors[c * 3 + 2] / 255);
 			}
@@ -370,9 +394,6 @@ if (colorscheme !== undefined) {
 var canvas = document.getElementById('myCanvas');
 
 document.onkeydown = function(ev) {
-	if (!active)
-		return;
-
 	if (ev.keyCode === 91 ||
 	    ev.keyCode === 18 ||
 	    ev.keyCode === 17 ||
@@ -392,9 +413,6 @@ document.onkeydown = function(ev) {
 };
 
 document.onkeypress = function(ev) {
-	if (!active)
-		return;
-
 	var mod = (ev.shiftKey << 1) | (ev.ctrlKey << 2) | ev.altKey;
 	var data = new Uint8Array([cmd.sendKey, 0, ev.charCode, mod]);
 	logCharCode(ev);
@@ -411,26 +429,68 @@ document.onkeypress = function(ev) {
 
 var lastConstraint = null;
 function fitCanvasToParent() {
-	var maxw = canvas.parentNode.offsetWidth;
-	var maxh = canvas.parentNode.offsetHeight;
-	var aspectRatio = canvas.width / canvas.height;
-	var constrainWidth = (maxw / maxh < aspectRatio);
-
-	if (lastConstraint === constrainWidth) {
-		return;
-	}
-	console.log("new constrainWidth: " + constrainWidth);
-
-	if (constrainWidth) {
-		canvas.style.width  = "100%";
-		canvas.style.height = "";
-	} else {
-		canvas.style.width  = "";
-		canvas.style.height = "100%";
-	}
-
-	lastConstraint = constrainWidth;
+	// DF itself stretches its square tiles to fit the window (non-square
+	// cells), so mirror that: just fill the container on both axes.
+	canvas.style.width  = "100%";
+	canvas.style.height = "100%";
 }
+
+// Mouse opcode type constants (must match server.cpp / webfort.cpp)
+var MOUSE_MOVE  = 0;
+var MOUSE_DOWN  = 1;
+var MOUSE_UP    = 2;
+var MOUSE_WHEEL = 3;
+
+// Translate a canvas pointer event to tile coordinates.
+function canvasToTile(ev) {
+	var rect = canvas.getBoundingClientRect();
+	var scaleX = canvas.width  / rect.width;
+	var scaleY = canvas.height / rect.height;
+	var px = (ev.clientX - rect.left) * scaleX;
+	var py = (ev.clientY - rect.top)  * scaleY;
+	var tx = Math.max(0, Math.min(dimx - 1, Math.floor(px / tilew)));
+	var ty = Math.max(0, Math.min(dimy - 1, Math.floor(py / tileh)));
+	return [tx, ty];
+}
+
+function sendMouseEvent(type, tile, button) {
+	if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+	var data = new Uint8Array([cmd.sendMouse, tile[0], tile[1], button, type]);
+	websocket.send(data);
+}
+
+// Throttle mousemove to ~60Hz.
+var lastMouseSend = 0;
+canvas.addEventListener('mousemove', function(ev) {
+	var now = Date.now();
+	if (now - lastMouseSend < 16) return;
+	lastMouseSend = now;
+	sendMouseEvent(MOUSE_MOVE, canvasToTile(ev), 0);
+	ev.preventDefault();
+});
+
+canvas.addEventListener('mousedown', function(ev) {
+	var btn = ev.button === 2 ? 2 : (ev.button === 1 ? 3 : 1);
+	sendMouseEvent(MOUSE_DOWN, canvasToTile(ev), btn);
+	ev.preventDefault();
+});
+
+canvas.addEventListener('mouseup', function(ev) {
+	var btn = ev.button === 2 ? 2 : (ev.button === 1 ? 3 : 1);
+	sendMouseEvent(MOUSE_UP, canvasToTile(ev), btn);
+	ev.preventDefault();
+});
+
+canvas.addEventListener('wheel', function(ev) {
+	var type = ev.deltaY > 0 ? MOUSE_WHEEL : MOUSE_WHEEL;
+	var btn  = ev.deltaY > 0 ? 5 : 4; // 4=up 5=down (scroll directions)
+	sendMouseEvent(type, canvasToTile(ev), btn);
+	ev.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener('contextmenu', function(ev) {
+	ev.preventDefault();
+});
 
 window.onresize = fitCanvasToParent;
 window.onload   = fitCanvasToParent;

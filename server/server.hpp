@@ -11,7 +11,7 @@
 #include <ctime>
 #include <map>
 #include <string>
-#include "tinythread.h"
+#include <thread>
 #include <websocketpp/server.hpp>
 
 #include "Console.h"

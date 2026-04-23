@@ -2,120 +2,66 @@ get_directory_property(isPlugin PARENT_DIRECTORY)
 
 project(webfort)
 
-if (NOT isPlugin)
-	cmake_minimum_required(VERSION 2.8)
-	set(DFHACK_VER 0.34.11)
-	set(DFHACK_REL r5)
-	add_definitions(-DDFHACK_VERSION="${DFHACK_VER}-${DFHACK_REL}")
-	# dfhack path
-	set(DH dfhack)
-endif()
+# ----------------------------------------------------------------------------
+# Phase 2 port: WebSocket server + direct screen capture. Input injection
+# (input.hpp) is still stubbed — finalized in Phase 3.
+# ----------------------------------------------------------------------------
 
-# A list of source files
 set(SRC
-	webfort.cpp
-	server.cpp
-	config.cpp
+    webfort.cpp
+    server.cpp
+    config.cpp
 )
-# A list of headers
+
 set(HDRS
-	webfort.hpp
-	server.hpp
-	config.hpp
-	renderer_wrap.hpp
-	input.hpp
+    webfort.hpp
+    server.hpp
+    config.hpp
+    input.hpp
 )
 set_source_files_properties(${HDRS} PROPERTIES HEADER_FILE_ONLY TRUE)
-
-# mash them together (headers are marked as headers and nothing will try to compile them)
 list(APPEND SRC ${HDRS})
 
-set(PROJECT_LIBS)
-
-#linux
-if(UNIX)
-	add_definitions(
-		-std=c++11
-		-DLINUX_BUILD
-		-D_WEBSOCKETPP_CPP11_STL_
-	)
-	list(APPEND PROJECT_LIBS pthread)
-	set(DF_ROOT ${CMAKE_SOURCE_DIR}/df_linux)
-# windows
-else(UNIX)
-	if(NOT MSVC10)
-		message(FATAL_ERROR "Visual Studio 2010 required.")
-	endif()
-	set(WFDIR ${CMAKE_CURRENT_BINARY_DIR})
-	add_definitions(
-		-D_WEBSOCKETPP_CPP11_FUNCTIONAL_
-		-D_WEBSOCKETPP_CPP11_SYSTEM_ERROR_
-		-D_WEBSOCKETPP_CPP11_RANDOM_DEVICE_
-		-D_WEBSOCKETPP_CPP11_MEMORY_
-		-DNOMINMAX
-		-DWIN32_LEAN_AND_MEAN
-	)
-	option(DL_DEPS "Download dependencies as windows binaries over https." ON)
-	# Download deps
-	if(DL_DEPS)
-		message("Downloading dependencies. This may take a while.")
-		file(DOWNLOAD https://s3.amazonaws.com/webfort/webfort-deps-r1.tar.gz
-			${WFDIR}/webfort-deps.tar.gz
-			EXPECTED_MD5 24e047672dc7cd787556810620838549)
-		execute_process(COMMAND ${CMAKE_COMMAND} -E tar xzf ${WFDIR}/webfort-deps.tar.gz WORKING_DIRECTORY ${WFDIR})
-		message("Dependencies downloaded :)")
-	endif()
-
-	set(SDL_DIR ${WFDIR}/SDL)
-	set(CMAKE_PREFIX_PATH ${SDL_DIR})
-	set(BOOST_ROOT ${WFDIR}/boost)
-	link_directories(${BOOST_ROOT}/lib) # Boost doesn't find everything
-endif(UNIX)
-
-# SDL Headers
-find_package(SDL 1.2 REQUIRED)
-include_directories(${SDL_INCLUDE_DIRS})
-
-# Boost/Asio
-set(Boost_FIND_REQUIRED TRUE)
-set(Boost_USE_STATIC_LIBS ON)
-set(WS_BOOST_LIBS system thread regex)
-find_package(Boost 1.39.0 COMPONENTS "${WS_BOOST_LIBS}")
-
-if(Boost_FOUND)
-	include_directories(${Boost_INCLUDE_DIRS})
-	list(APPEND PROJECT_LIBS ${Boost_LIBRARIES})
+# Linux only for now.
+if(NOT UNIX)
+    message(FATAL_ERROR "webfort only builds on Linux in this port.")
 endif()
 
-# websocketpp
-include_directories(websocketpp)
+# Boost + Asio for vendored websocketpp.
+set(Boost_USE_STATIC_LIBS ON)
+find_package(Boost 1.39.0 REQUIRED COMPONENTS system thread regex)
 
 if (isPlugin)
-	DFHACK_PLUGIN(webfort ${SRC} LINK_LIBRARIES dfhack-tinythread ${PROJECT_LIBS})
-	INSTALL(DIRECTORY ../dist/shared/ DESTINATION .)
+    DFHACK_PLUGIN(webfort ${SRC}
+        LINK_LIBRARIES ${Boost_LIBRARIES} pthread
+    )
+    target_include_directories(webfort PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/websocketpp
+        ${Boost_INCLUDE_DIRS}
+        ${SDL2_INCLUDE_DIRS}
+    )
+    target_compile_definitions(webfort PRIVATE
+        LINUX_BUILD
+        _WEBSOCKETPP_CPP11_STL_
+    )
+    # websocketpp 0.8.x emits warnings that -Werror (inherited from DFHack)
+    # would otherwise turn into failures.
+    target_compile_options(webfort PRIVATE
+        -Wno-error=deprecated-declarations
+        -Wno-error=unused-result
+        -Wno-error=unused-variable
+        -Wno-error=unused-but-set-variable
+        -Wno-error=sign-compare
+        -Wno-error=parentheses
+        -Wno-error=uninitialized
+        -Wno-error=maybe-uninitialized
+    )
 else()
-	if (NOT UNIX)
-		message(FATAL_ERROR "Building webfort out-of-tree not supported on windows.")
-	endif()
-	find_library(DFHACK_LIBRARY dfhack ${DH}/build/library)
-	find_library(TINYTHREAD_LIBRARY dfhack-tinythread ${DH}/build/depends/tthread)
-	list(APPEND PROJECT_LIBS
-		${DFHACK_LIBRARY}
-		${TINYTHREAD_LIBRARY}
-	)
-
-	include_directories(
-		${DH}/library/include
-		${DH}/library/proto
-		${DH}/depends/protobuf
-		${DH}/depends/tthread
-	)
-
-	add_library(webfort.plug SHARED ${SRC})
-	target_link_libraries(webfort.plug ${PROJECT_LIBS})
-	# Installing
-	install(TARGETS webfort.plug
-		RUNTIME DESTINATION ${DF_ROOT}/hack/plugins
-		LIBRARY DESTINATION ${DF_ROOT}/hack/plugins
-	)
+    message(FATAL_ERROR "webfort must be built as a DFHack plugin.")
 endif()
+
+# Install static frontend assets alongside the plugin so the embedded HTTP
+# handler can serve them from <hack>/webfort/static/.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../static/"
+    DESTINATION "${DFHACK_DATA_DESTINATION}/webfort/static"
+)

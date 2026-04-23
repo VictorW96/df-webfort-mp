@@ -11,8 +11,8 @@
 var config = {
 	host: document.location.hostname,
 	port: '1234',
-	tiles: "Spacefox_16x16.png",
-	text: "ShizzleClean.png",
+	tiles: "df53_curses_square_16x16.png",
+	text: "df53_curses_square_16x16.png",
 	nick: "",
 	secret: "",
 	colors: undefined,
