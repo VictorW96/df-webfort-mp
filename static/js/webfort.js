@@ -52,7 +52,9 @@ var dimy   = 25;
 var cmd = {
 	"update":       110,
 	"sendKey":      111,
+	"cursorsUpdate": 112,
 	"sendMouse":    113,
+	"cursorMove":   114,
 	"connect":      115,
 	"requestTurn":  116
 };
@@ -284,6 +286,46 @@ function onMessage(evt) {
 		}
 		lastFrame = performance.now();
 		if (stats) { stats.end(); }
+	} else if (data[0] === cmd.cursorsUpdate) {
+		// Opcode 112: ghost cursor broadcast
+		// Format: [112, count, (nick_len, nick..., tile_x, tile_y, color_idx)...]
+		var cursorCanvas = document.getElementById('cursorCanvas');
+		if (cursorCanvas) {
+			// Match size to main canvas
+			if (cursorCanvas.width !== canvas.width || cursorCanvas.height !== canvas.height) {
+				cursorCanvas.width  = canvas.width;
+				cursorCanvas.height = canvas.height;
+			}
+			var cctx = cursorCanvas.getContext('2d');
+			cctx.clearRect(0, 0, cursorCanvas.width, cursorCanvas.height);
+			var count = data[1];
+			// Cursor colors by slot index: 0=driver(white), 1=cyan, 2=yellow, 3=magenta...
+			var CURSOR_COLORS = ['#ffffff', '#00e5ff', '#ffea00', '#ff40ff', '#40ff80'];
+			var offset = 2;
+			for (var ci = 0; ci < count; ci++) {
+				var nick_len = data[offset++];
+				var pnick = '';
+				for (var ni = 0; ni < nick_len - 1 && offset + ni < data.length; ni++) {
+					if (data[offset + ni] === 0) break;
+					pnick += String.fromCharCode(data[offset + ni]);
+				}
+				offset += nick_len;
+				var cx = data[offset++];
+				var cy = data[offset++];
+				var cidx = data[offset++];
+				var color = CURSOR_COLORS[cidx % CURSOR_COLORS.length];
+				// Draw 1-tile border highlight
+				cctx.strokeStyle = color;
+				cctx.lineWidth = 2;
+				cctx.strokeRect(cx * tilew + 1, cy * tileh + 1, tilew - 2, tileh - 2);
+				// Draw nick label above
+				if (pnick) {
+					cctx.fillStyle = color;
+					cctx.font = '9px monospace';
+					cctx.fillText(pnick, cx * tilew, cy * tileh - 2);
+				}
+			}
+		}
 	}
 }
 
@@ -433,6 +475,12 @@ function fitCanvasToParent() {
 	// cells), so mirror that: just fill the container on both axes.
 	canvas.style.width  = "100%";
 	canvas.style.height = "100%";
+	// Keep the cursor overlay canvas exactly on top of the main canvas.
+	var cursorCanvas = document.getElementById('cursorCanvas');
+	if (cursorCanvas) {
+		cursorCanvas.style.width  = canvas.style.width;
+		cursorCanvas.style.height = canvas.style.height;
+	}
 }
 
 // Mouse opcode type constants (must match server.cpp / webfort.cpp)
@@ -465,7 +513,12 @@ canvas.addEventListener('mousemove', function(ev) {
 	var now = Date.now();
 	if (now - lastMouseSend < 16) return;
 	lastMouseSend = now;
-	sendMouseEvent(MOUSE_MOVE, canvasToTile(ev), 0);
+	var tile = canvasToTile(ev);
+	sendMouseEvent(MOUSE_MOVE, tile, 0);
+	// Also send ghost cursor position for all players (server decides what to do with it).
+	if (websocket && websocket.readyState === WebSocket.OPEN) {
+		websocket.send(new Uint8Array([cmd.cursorMove, tile[0], tile[1]]));
+	}
 	ev.preventDefault();
 });
 

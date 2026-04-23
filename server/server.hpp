@@ -22,6 +22,12 @@ typedef struct {
     unsigned char mod[256*256];
     time_t atime;
     bool is_admin;
+    // Tier 1 two-player: ghost cursor position.
+    // The driver's cursor is written to gps->mouse_x/y.
+    // Non-driver cursors are stored here and broadcast to all clients.
+    int cursor_x;
+    int cursor_y;
+    bool cursor_active;
 } Client;
 
 // FIXME: webfort.cpp should not know about this

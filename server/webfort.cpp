@@ -100,9 +100,9 @@ static void capture_screen_buffer(); // forward-declare for the hooks below
 
 struct wf_dwarfmode_render_hook : df::viewscreen_dwarfmodest {
     typedef df::viewscreen_dwarfmodest interpose_base;
-    DEFINE_VMETHOD_INTERPOSE(void, render, ())
+    DEFINE_VMETHOD_INTERPOSE(void, render, (uint32_t flags))
     {
-        INTERPOSE_NEXT(render)();
+        INTERPOSE_NEXT(render)(flags);
         capture_screen_buffer();
     }
 };
@@ -110,21 +110,20 @@ IMPLEMENT_VMETHOD_INTERPOSE(wf_dwarfmode_render_hook, render);
 
 struct wf_dungeonmode_render_hook : df::viewscreen_dungeonmodest {
     typedef df::viewscreen_dungeonmodest interpose_base;
-    DEFINE_VMETHOD_INTERPOSE(void, render, ())
+    DEFINE_VMETHOD_INTERPOSE(void, render, (uint32_t flags))
     {
-        INTERPOSE_NEXT(render)();
+        INTERPOSE_NEXT(render)(flags);
         capture_screen_buffer();
     }
 };
 IMPLEMENT_VMETHOD_INTERPOSE(wf_dungeonmode_render_hook, render);
 
 // Generic hook for all other viewscreens (setup, choose_start_site, etc.).
-// Because df::viewscreen is an abstract base, we interpose its render().
 struct wf_viewscreen_render_hook : df::viewscreen {
     typedef df::viewscreen interpose_base;
-    DEFINE_VMETHOD_INTERPOSE(void, render, ())
+    DEFINE_VMETHOD_INTERPOSE(void, render, (uint32_t flags))
     {
-        INTERPOSE_NEXT(render)();
+        INTERPOSE_NEXT(render)(flags);
         capture_screen_buffer();
     }
 };

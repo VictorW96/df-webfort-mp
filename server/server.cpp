@@ -342,6 +342,9 @@ void on_open(server* s, conn_hdl hdl)
     cl->nick = nick;
     cl->atime = round_timer();
     memset(cl->mod, 0, sizeof(cl->mod));
+    cl->cursor_x = -1;
+    cl->cursor_y = -1;
+    cl->cursor_active = false;
 
     assert(cl->addr != "");
     assert(cl->nick != "__NOBODY");
@@ -432,6 +435,44 @@ void tock(server* s, conn_hdl hdl)
         }
     }
     s->send(hdl, (const void*) buf, (size_t)(b-buf), ws::frame::opcode::binary);
+
+    // -- Cursor broadcast (opcode 112): one separate packet per tick --
+    // Format: [112, count, (nick_len, nick..., tile_x, tile_y, color_idx)...]
+    // color_idx: 0=driver (white), 1..N-1 = spectators (cycling colors)
+    {
+        unsigned char cbuf[4096];
+        unsigned char *cb = cbuf;
+        *(cb++) = 112; // CURSORS_UPDATE
+        unsigned char *count_byte = cb++; // fill in count below
+        uint8_t count = 0;
+        uint8_t color_idx = 0;
+        for (auto& kv : clients) {
+            if (!kv.second) continue;
+            // Skip the requesting client — they don't see their own cursor.
+            if (kv.first == hdl) { color_idx++; continue; }
+            Client* c = kv.second;
+            bool is_driver = (kv.first == active_conn);
+            // Driver cursor: use gps->mouse_x/y if tracking is on
+            int cx = is_driver ? gps->mouse_x : c->cursor_x;
+            int cy = is_driver ? gps->mouse_y : c->cursor_y;
+            bool active_cursor = is_driver ? (gps->mouse_x >= 0) : c->cursor_active;
+            if (!active_cursor) { color_idx++; continue; }
+            uint8_t nick_len = (uint8_t)(c->nick.size() + 1);
+            if (cb + nick_len + 4 > cbuf + sizeof(cbuf)) break;
+            *(cb++) = nick_len;
+            memcpy(cb, c->nick.c_str(), nick_len);
+            cb += nick_len;
+            *(cb++) = (uint8_t)cx;
+            *(cb++) = (uint8_t)cy;
+            *(cb++) = color_idx; // 0=driver(white), 1+=spectators
+            count++;
+            color_idx++;
+        }
+        *count_byte = count;
+        if (count > 0) {
+            s->send(hdl, (const void*)cbuf, (size_t)(cb-cbuf), ws::frame::opcode::binary);
+        }
+    }
 }
 
 void on_message(server* s, conn_hdl hdl, message_ptr msg)
@@ -490,6 +531,14 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
     } else if (mdata[0] == 113 && msz == 5) { // MouseEvent
         // [113, tile_x, tile_y, button, type]
         simmouse(mdata[1], mdata[2], mdata[3], (WFMouseType)mdata[4]);
+    } else if (mdata[0] == 114 && msz == 3) { // cursorMove (non-driver ghost cursor)
+        // [114, tile_x, tile_y]
+        Client* cl = get_client(hdl);
+        if (cl) {
+            cl->cursor_x = mdata[1];
+            cl->cursor_y = mdata[2];
+            cl->cursor_active = true;
+        }
     } else if (mdata[0] == 115) { // refreshScreen
         Client* cl = get_client(hdl);
         memset(cl->mod, 0, sizeof(cl->mod));
