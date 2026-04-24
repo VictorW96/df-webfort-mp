@@ -35,6 +35,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Core.h"
@@ -79,6 +80,7 @@ using df::global::enabler;
 using df::global::gps;
 using df::global::init;
 using df::global::plotinfo;
+using df::global::ui_menu_width;
 using df::global::world;
 
 DFHACK_PLUGIN("webfort");
@@ -87,53 +89,76 @@ DFHACK_PLUGIN_IS_ENABLED(enabled);
 REQUIRE_GLOBAL(gps);
 REQUIRE_GLOBAL(init);
 REQUIRE_GLOBAL(plotinfo);
+REQUIRE_GLOBAL(ui_menu_width);
 REQUIRE_GLOBAL(world);
 
 // -----------------------------------------------------------------------------
-// Post-render capture hooks (Phase 4)
-// Capture gps->screen AFTER viewscreen::render() has written the latest
-// cursor/hover/overlay state. One hook per concrete viewscreen class covers
-// all gameplay screens; the fallback in plugin_onupdate covers the rest.
+// Render hooks (Phase 4) — mouse stamping only
+//
+// Priority 200 > DFHack overlay plugin's priority 100:
+//   webfort(200) → overlay(100) → native render()
+//
+// These hooks do NOT capture the screen. DF's graphics.cpp calls:
+//   1. currentscreen->render(curtick)      ← vtable chain, hooks fire here
+//   2. currentscreen->widgets.render()     ← DFHack overlay widgets (Stocks
+//                                            dialog, sidebar help, etc.) draw HERE
+// Any vtable-hook capture would miss the widgets.render() content.
+//
+// Instead, plugin_onupdate captures after both calls have completed. In DF's
+// async_loop, the render command (render_things) is always processed BEFORE
+// mainloop() runs for the same frame, so the fallback in plugin_onupdate sees
+// the fully composited gps->screen including all overlay widgets.
+//
+// The hooks' only job is to stamp the virtual mouse coordinates into gps
+// BEFORE INTERPOSE_NEXT, so DF's render code reads our coords (not the
+// physical mouse position from SDL_GetMouseState which ran on the main thread
+// just before the render command was dispatched).
 // -----------------------------------------------------------------------------
 
-static void capture_screen_buffer(); // forward-declare for the hooks below
+static void capture_screen_buffer(); // forward-declare
+
+// Last known virtual mouse tile, persisted across ticks. -1 = no cursor yet.
+static int g_wf_mouse_tile_x = -1;
+static int g_wf_mouse_tile_y = -1;
+
+// Stamp virtual mouse coords into gps at the start of a render hook.
+static inline void wf_stamp_mouse()
+{
+    if (!enabled || g_wf_mouse_tile_x < 0 || !gps || !init || !enabler)
+        return;
+    const int32_t tile_px_w = init->display.grid_x ? init->display.grid_x : 16;
+    const int32_t tile_px_h = init->display.grid_y ? init->display.grid_y : 16;
+    gps->mouse_x = g_wf_mouse_tile_x;
+    gps->mouse_y = g_wf_mouse_tile_y;
+    gps->precise_mouse_x = g_wf_mouse_tile_x * tile_px_w + tile_px_w / 2;
+    gps->precise_mouse_y = g_wf_mouse_tile_y * tile_px_h + tile_px_h / 2;
+    enabler->tracking_on = 1;
+}
 
 struct wf_dwarfmode_render_hook : df::viewscreen_dwarfmodest {
     typedef df::viewscreen_dwarfmodest interpose_base;
     DEFINE_VMETHOD_INTERPOSE(void, render, (uint32_t flags))
     {
+        wf_stamp_mouse();
         INTERPOSE_NEXT(render)(flags);
-        capture_screen_buffer();
     }
 };
-IMPLEMENT_VMETHOD_INTERPOSE(wf_dwarfmode_render_hook, render);
+IMPLEMENT_VMETHOD_INTERPOSE_PRIO(wf_dwarfmode_render_hook, render, 200);
 
 struct wf_dungeonmode_render_hook : df::viewscreen_dungeonmodest {
     typedef df::viewscreen_dungeonmodest interpose_base;
     DEFINE_VMETHOD_INTERPOSE(void, render, (uint32_t flags))
     {
+        wf_stamp_mouse();
         INTERPOSE_NEXT(render)(flags);
-        capture_screen_buffer();
     }
 };
-IMPLEMENT_VMETHOD_INTERPOSE(wf_dungeonmode_render_hook, render);
-
-// Generic hook for all other viewscreens (setup, choose_start_site, etc.).
-struct wf_viewscreen_render_hook : df::viewscreen {
-    typedef df::viewscreen interpose_base;
-    DEFINE_VMETHOD_INTERPOSE(void, render, (uint32_t flags))
-    {
-        INTERPOSE_NEXT(render)(flags);
-        capture_screen_buffer();
-    }
-};
-IMPLEMENT_VMETHOD_INTERPOSE(wf_viewscreen_render_hook, render);
+IMPLEMENT_VMETHOD_INTERPOSE_PRIO(wf_dungeonmode_render_hook, render, 200);
 
 static void wf_apply_render_hooks(bool enable)
 {
     INTERPOSE_HOOK(wf_dwarfmode_render_hook, render).apply(enable);
     INTERPOSE_HOOK(wf_dungeonmode_render_hook, render).apply(enable);
-    INTERPOSE_HOOK(wf_viewscreen_render_hook, render).apply(enable);
 }
 
 // Shared with server.cpp via server.hpp externs.
@@ -218,11 +243,10 @@ static bool is_text_tile(int x, int y, bool &is_map)
 
     if (IS_SCREEN(viewscreen_dwarfmodest))
     {
-        // Gui::getMenuWidth was removed in DFHack 53.x. For the Phase 2
-        // port we conservatively assume the default menu layout; Phase 3+
-        // can reintroduce a precise layout calculation (likely via the new
-        // overlay / interface layer widths).
-        uint8_t menu_width = 2, area_map_width = 3;
+        // Read the live menu-width values from DF's own global (menuposition[0/1]).
+        // Falls back to conservative defaults if the global is not available.
+        uint8_t menu_width     = ui_menu_width ? (*ui_menu_width)[0] : 2;
+        uint8_t area_map_width = ui_menu_width ? (*ui_menu_width)[1] : 3;
         int32_t menu_left = w - 1, menu_right = w - 1;
 
         bool menuforced = (plotinfo->main.mode != df::ui_sidebar_mode::Default ||
@@ -330,19 +354,88 @@ static void capture_screen_buffer()
     const bool dims_changed =
         (dimx != sc_prev_dimx) || (dimy != sc_prev_dimy);
 
+    // Build a reverse map: screentexpos value → CP437 character code.
+    //
+    // In DF 53.12 graphics mode, text and border characters rendered with
+    // add_tile() store their glyph as a font-atlas texpos in screentexpos[]
+    // rather than writing the character code into screen[0]. screen[0] is
+    // left as 0 (override_tiles) or 32 (erasescreen), making those tiles
+    // invisible without this reverse-mapping step.
+    //
+    // Characters rendered with addchar() (e.g. game map tiles, plain UI text)
+    // do have their code in screen[0] AND clear screentexpos → handled by the
+    // dst[0] = s[0] path below.
+    //
+    // large_font_texpos[ch] gives the texpos used when rendering character ch
+    // in the large (main) font. We invert this 256-entry table so that given
+    // any non-zero screentexpos we can look up the original character.
+    std::unordered_map<long, uint8_t> texpos_to_char;
+    if (init) {
+        for (int ch = 1; ch < 256; ch++) {
+            long tp = init->font.large_font_texpos[ch];
+            if (tp > 0) texpos_to_char.emplace(tp, (uint8_t)ch);
+        }
+    }
+
     for (int32_t x = 0; x < dimx; x++) {
         for (int32_t y = 0; y < dimy; y++) {
             const int tile = x * dimy + y;
             unsigned char* dst = sc + tile * 4;
             const unsigned char* s = src + tile * 8;
 
-            uint8_t fg_idx = match_color(s[1], s[2], s[3]);
-            uint8_t bg_idx = match_color(s[4], s[5], s[6]);
+            // Determine the character code for this tile.
+            //
+            // DF 53.12 uses three distinct paths depending on context:
+            //
+            // 1. addchar(ch): screen[0]=ch, screentexpos=0. Covers most UI
+            //    text and plain game tiles. Handled by dst[0]=s[0] below.
+            //
+            // 2. add_tile(texpos): screentexpos=texpos, screen[0] left as 0
+            //    or 32. Used for graphical map sprites AND dialog border/button
+            //    glyphs in graphics mode. We reverse-map the texpos back to
+            //    the CP437 character code via large_font_texpos[].
+            //
+            // 3. screen_top overlay (top_in_use): DF renders dialog paragraph
+            //    text into screen_top with ch>32 and non-zero RGB. The base
+            //    screen at those positions is blank (ch=32/0, RGB=0). We
+            //    overlay only tiles where screen_top has ch>32, which skips
+            //    the erased tiles (ch=32, RGB=0) that fill the rest of
+            //    screen_top and would otherwise wipe out base-screen border
+            //    chars resolved by path 2.
+            const unsigned char* src_top =
+                (gps->top_in_use && gps->screen_top) ? gps->screen_top : nullptr;
 
-            dst[0] = s[0];                // character
-            dst[1] = fg_idx & 0x7;        // fg 0..7
-            dst[2] = bg_idx & 0x7;        // bg 0..7
-            dst[3] = (fg_idx & 0x8) ? 1 : 0; // bold flag
+            uint8_t char_code = s[0];
+            uint8_t fg_r = s[1], fg_g = s[2], fg_b = s[3];
+            uint8_t bg_r = s[4], bg_g = s[5], bg_b = s[6];
+
+            // Path 3: screen_top text overlay.
+            if (src_top) {
+                const unsigned char* st = src_top + tile * 8;
+                if (st[0] > 32) {
+                    char_code = st[0];
+                    fg_r = st[1]; fg_g = st[2]; fg_b = st[3];
+                    bg_r = st[4]; bg_g = st[5]; bg_b = st[6];
+                }
+            }
+
+            // Path 2: screentexpos reverse-map, when char_code is still blank.
+            if (char_code <= 32 && gps->screentexpos) {
+                long tp = gps->screentexpos[tile];
+                if (tp > 0) {
+                    auto it = texpos_to_char.find(tp);
+                    if (it != texpos_to_char.end())
+                        char_code = it->second;
+                }
+            }
+
+            uint8_t fg_idx = match_color(fg_r, fg_g, fg_b);
+            uint8_t bg_idx = match_color(bg_r, bg_g, bg_b);
+
+            dst[0] = char_code;
+            dst[1] = fg_idx & 0x7;
+            dst[2] = bg_idx & 0x7;
+            dst[3] = (fg_idx & 0x8) ? 1 : 0;
 
             bool is_map;
             if (is_text_tile(x, y, is_map))
@@ -385,11 +478,6 @@ std::mutex               g_wf_input_mutex;
 std::vector<WFKeyEvent>  g_wf_input_queue;
 std::mutex               g_wf_mouse_mutex;
 std::vector<WFMouseEvent> g_wf_mouse_queue;
-
-// Last known virtual mouse tile, persisted across ticks so DF's SDL event
-// loop can't clobber it. -1 means "no virtual cursor yet".
-static int g_wf_mouse_tile_x = -1;
-static int g_wf_mouse_tile_y = -1;
 
 // Translate a webfort key event to an SDL_Keycode. Returns 0 if unknown.
 // The webfort protocol sends either a JS DOM keyCode (mdata[1], non-printable
@@ -491,11 +579,8 @@ void wf_flush_input_queue()
         local.swap(g_wf_input_queue);
     }
 
-    { FILE* f = fopen("/tmp/webfort.log", "a"); if (f) { fprintf(f, "[webfort] flush: %zu events (SDL push)\n", local.size()); fclose(f); } }
-
     for (const auto& ev : local) {
         SDL_Keycode sk = wf_to_sdl_keycode(ev.sym, ev.unicode);
-        { FILE* f = fopen("/tmp/webfort.log", "a"); if (f) { fprintf(f, "[webfort]   ev sym=%d uni=%d mods=%d -> SDL sym=0x%x\n", ev.sym, ev.unicode, ev.sdlmods, (unsigned)sk); fclose(f); } }
         if (!sk)
             continue;
 
@@ -551,6 +636,17 @@ static void wf_apply_mouse(int tile_x, int tile_y, uint8_t button,
     }
 
     if (type == WF_MOUSE_WHEEL) {
+        // Push a real SDL_MOUSEWHEEL event so DF's SDL handler processes it
+        // (this is what changes z-levels on the map). Also feed the scroll
+        // interface key so list/menu widgets scroll correctly.
+        SDL_Event wev;
+        memset(&wev, 0, sizeof(wev));
+        wev.type = SDL_MOUSEWHEEL;
+        wev.wheel.type = SDL_MOUSEWHEEL;
+        wev.wheel.x = 0;
+        wev.wheel.y = (button == 4) ? 1 : -1; // 4=scroll up, 5=scroll down
+        DFHack::DFSDL::DFSDL_PushEvent(&wev);
+
         std::set<df::interface_key> keys;
         keys.insert(button == 4
             ? df::interface_key::STANDARDSCROLL_UP
@@ -684,6 +780,12 @@ DFhackCExport command_result plugin_onupdate(color_ostream& /*out*/)
             ws->feed(&empty_keys);
         }
     }
+
+    // Capture the current frame. In DF's async_loop the render command
+    // (render_things → viewscreen->render + widgets->render) always runs
+    // BEFORE mainloop() for the same frame, so gps->screen here is the
+    // fully composited frame including all DFHack overlay widgets.
+    capture_screen_buffer();
     return CR_OK;
 }
 

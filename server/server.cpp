@@ -480,8 +480,6 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
     auto str = msg->get_payload();
     const unsigned char *mdata = (const unsigned char*) str.c_str();
     int msz = str.size();
-    { FILE* f = fopen("/tmp/webfort.log", "a"); if (f) { fprintf(f, "[webfort] on_message op=%d sz=%d\n", msz>0?mdata[0]:-1, msz); fclose(f); } }
-
     if (mdata[0] == 112 && msz == 3) { // ResizeEvent
         if (hdl == active_conn) {
             newwidth = mdata[1];
@@ -494,7 +492,6 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
         // single-user port it's a hindrance.
         Client* cl = get_client(hdl);
         SDL::Key k = mdata[2] ? (SDL::Key)mdata[2] : mapInputCodeToSDL(mdata[1]);
-        { FILE* f = fopen("/tmp/webfort.log", "a"); if (f) { fprintf(f, "[webfort] recv KeyEvent kc=%d cc=%d mod=%d -> sym=%d\n", mdata[1], mdata[2], mdata[3], (int)k); fclose(f); } }
         bool is_safe_key = (cl && cl->is_admin) ||
             k != SDL::K_ESCAPE ||
             is_safe_to_escape();
@@ -557,9 +554,9 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
     return;
 }
 
-void on_init(conn_hdl hdl, boost::asio::ip::tcp::socket & s)
+void on_init(conn_hdl hdl, asio::ip::tcp::socket & s)
 {
-    s.set_option(boost::asio::ip::tcp::no_delay(true));
+    s.set_option(asio::ip::tcp::no_delay(true));
 }
 
 void wsloop(void *a_srv)
@@ -649,7 +646,7 @@ void WFServerImpl::start()
             *out << "ERROR: Unable to listen on port " << PORT
                  << " (v6): " << ec.message() << " - retrying on v4" << std::endl;
             ec.clear();
-            srv.listen(boost::asio::ip::tcp::v4(), PORT, ec);
+            srv.listen(asio::ip::tcp::v4(), PORT, ec);
             if (ec) {
                 *out << "ERROR: Unable to start Webfort on port " << PORT
                      << " (v4 also failed): " << ec.message() << std::endl;
