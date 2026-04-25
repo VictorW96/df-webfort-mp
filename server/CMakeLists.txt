@@ -11,6 +11,7 @@ set(SRC
     webfort.cpp
     server.cpp
     config.cpp
+    ${CMAKE_SOURCE_DIR}/depends/lodepng/lodepng.cpp
 )
 
 set(HDRS
@@ -41,6 +42,7 @@ if (isPlugin)
         ${CMAKE_CURRENT_SOURCE_DIR}/websocketpp
         ${CMAKE_CURRENT_SOURCE_DIR}/asio      # standalone Asio headers
         ${SDL2_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/depends/lodepng   # lodepng single-file PNG encoder
     )
     target_compile_definitions(webfort PRIVATE
         ASIO_STANDALONE                # websocketpp: use standalone Asio, not Boost
@@ -67,12 +69,13 @@ if (isPlugin)
             -Wno-error=maybe-uninitialized
         )
     else()
-        # Suppress equivalent MSVC warnings from websocketpp headers.
+        # Suppress equivalent MSVC warnings from websocketpp headers and lodepng.
         target_compile_options(webfort PRIVATE
             /wd4267   # conversion from size_t to smaller type
             /wd4244   # conversion from larger to smaller integer type
             /wd4996   # deprecated function use
             /wd4127   # conditional expression is constant
+            /wd4334   # 32-bit shift implicitly converted to 64 bits (lodepng)
         )
     endif()
 else()

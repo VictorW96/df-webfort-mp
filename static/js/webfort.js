@@ -28,6 +28,20 @@ var colors = [
 
 var MAX_FPS = 20;
 
+// Sprite atlas loaded from /atlas.png + /atlas.json.
+// atlasImg  – HTMLImageElement (or null if not loaded yet)
+// atlasMap  – object: texpos_string → [atlas_x, atlas_y]
+// atlasTW   – sprite pixel width in the atlas
+// atlasTH   – sprite pixel height in the atlas
+var atlasImg = null;
+var atlasMap = null;
+var atlasTW  = 16;
+var atlasTH  = 16;
+// Last atlas version counter received from the server (bits[4..7] of tock byte[2]).
+// When it changes we re-fetch atlas.png/atlas.json.
+var lastAtlasVersion = -1;
+var atlasLoading = false;
+
 var host = params.host;
 var port = params.port;
 var tileSet = params.tiles;
@@ -41,6 +55,13 @@ var wsUri = 'ws://' + host + ':' + port +
 	'/' + encodeURIComponent(secret);
 console.log(wsUri);
 var active = false;
+// True when the server reports a non-dwarfmode screen is active (menus,
+// dialogs, setup screens). Used to route WASD and scroll to camera vs. game.
+var isInMenu = false;
+// Camera position reported by the server for this client's viewport.
+var camX = 0, camY = 0, camZ = 0;
+// Map size in tiles (received via opcode 118 on connect).
+var mapW = 0, mapH = 0, mapD = 0;
 var lastFrame = 0;
 
 var tilewh = 16; // TODO: remove vars
@@ -56,7 +77,9 @@ var cmd = {
 	"sendMouse":    113,
 	"cursorMove":   114,
 	"connect":      115,
-	"requestTurn":  116
+	"requestTurn":  116,
+	"camMove":      117,
+	"mapInfo":      118
 };
 
 // Converts integer value in seconds to a time string, HH:MM:SS
@@ -113,10 +136,53 @@ function setStatus(text, color, onclick) {
 	var m = document.getElementById('message');
 	m.innerHTML = text;
 	var st = m.parentNode;
-	if (onclick) {
-		st.addEventListener('click', onclick);
-	}
+	// Use .onclick (replaces previous handler) instead of addEventListener
+	// (which accumulates a new listener every tock frame and causes multiple
+	// requestTurn messages on a single click).
+	st.onclick = onclick || null;
 	st.style.backgroundColor = color;
+}
+
+// Fetch the sprite atlas from the server. Called on connect and whenever
+// the atlas version counter in the tock() header changes (world load, mode switch).
+// Retries every 3 seconds until the atlas is ready (builds after ~60 ticks).
+function loadAtlas() {
+	if (atlasLoading) return;
+	atlasLoading = true;
+	var base = 'http://' + host + ':' + port;
+	var ts = Date.now();
+	var jsonReq = new XMLHttpRequest();
+	jsonReq.open('GET', base + '/atlas.json?t=' + ts);
+	jsonReq.onload = function() {
+		if (jsonReq.status === 404) {
+			// Atlas not built yet — retry after 3 s.
+			atlasLoading = false;
+			setTimeout(loadAtlas, 3000);
+			return;
+		}
+		if (jsonReq.status !== 200) { atlasLoading = false; return; }
+		try {
+			var info = JSON.parse(jsonReq.responseText);
+			atlasTW = info.tw || 16;
+			atlasTH = info.th || 16;
+			// Load the PNG; only swap atlasImg+atlasMap atomically once the
+			// image is fully decoded so we never draw with a stale map.
+			var newMap = info.map || null;
+			var img = new Image();
+			img.onload = function() {
+				atlasImg = img;
+				atlasMap = newMap;
+				atlasLoading = false;
+			};
+			img.onerror = function() { atlasLoading = false; };
+			img.src = base + '/atlas.png?t=' + ts;
+		} catch(e) {
+			console.warn('webfort: atlas.json parse error', e);
+			atlasLoading = false;
+		}
+	};
+	jsonReq.onerror = function() { atlasLoading = false; setTimeout(loadAtlas, 3000); };
+	jsonReq.send();
 }
 
 function connect() {
@@ -132,9 +198,11 @@ function onOpen(evt) {
 	setStatus('Connected, initializing...', 'orange');
 
 	websocket.send(new Uint8Array([cmd.connect]));
-
 	websocket.send(new Uint8Array([cmd.update]));
 	websocket.onmessage = onMessage;
+
+	// Fetch sprite atlas in background; rendering falls back to CP437 until ready.
+	loadAtlas();
 }
 
 var isError = false;
@@ -160,13 +228,27 @@ function requestTurn() {
 	websocket.send(new Uint8Array([cmd.requestTurn]));
 }
 
+// Send a camera pan delta to the server (opcode 117).
+// dx/dy/dz are signed integers in [-128, 127]; packed as uint8 two's complement.
+function sendCamMove(dx, dy, dz) {
+	if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+	websocket.send(new Uint8Array([
+		cmd.camMove,
+		dx & 0xFF,
+		dy & 0xFF,
+		dz & 0xFF
+	]));
+}
+
 function renderQueueStatus(s) {
 	if (s.isActive) {
 		active = true;
 		setStatus("You're in charge now! Click here to end your turn.", 'green', requestTurn);
 	} else if (s.isNoPlayer) {
+		active = false;
 		setStatus("Nobody is playing right now. Click here to ask for a turn.", 'grey', requestTurn);
 	} else {
+		active = false;
 		var displayedName = s.currentPlayer || "Somebody else";
 		setStatus(displayedName +" is doing their best. Please wait warmly.", 'orange');
 	}
@@ -174,7 +256,7 @@ function renderQueueStatus(s) {
 }
 
 // TODO: document, split
-function renderUpdate(ctx, data, offset) {
+function renderUpdate(ctx, data, offset, graphicsMode) {
 	var t = [];
 	var k;
 	var x;
@@ -185,19 +267,64 @@ function renderUpdate(ctx, data, offset) {
 	var tilew2 = tilew * tilew;
 	var tileh2 = tileh * tileh;
 
-	for (k = offset; k < data.length; k += 5) {
+	for (k = offset; k < data.length; k += 9) {
 		x = data[k + 0];
 		y = data[k + 1];
 
-		s = data[k + 2];
+		s  = data[k + 2]; // char
 		bg = data[k + 3] % tilew;
 		fg = data[k + 4];
 
+		var texpos       = data[k + 5] | (data[k + 6] << 8);
+		var texpos_lower = data[k + 7] | (data[k + 8] << 8);
+
+		// --- Sprite path: graphical mode with a real sprite texpos ---
+		// In ASCII/curses mode graphicsMode is false and we always use CP437.
+		// In graphical mode we use the atlas for any tile with texpos > 0;
+		// tiles with texpos == 0 (pure text/UI) fall through to the CP437 path.
+		if (graphicsMode && texpos > 0 && atlasImg && atlasMap) {
+			var dst_x = x * tilew;
+			var dst_y = y * tileh;
+
+			var lkey = String(texpos_lower);
+			var ukey = String(texpos);
+			var hasLower = texpos_lower > 0 && atlasMap[lkey];
+			var hasUpper = !!atlasMap[ukey];
+
+			// Only use the sprite path if at least one sprite was found.
+			// If neither is in the atlas (e.g. world-load cleared surfaces
+			// and the atlas hasn't rebuilt yet), fall through to CP437 so
+			// the map isn't blank during the rebuild window.
+			if (hasLower || hasUpper) {
+				// Draw background color for transparent sprite regions.
+				var bg_x = ((bg % 4) * tilew2) + 15 * tilew;
+				var bg_y = (Math.floor(bg / 4) * tileh2) + 15 * tileh;
+				ctx.drawImage(cd, bg_x, bg_y, tilew, tileh, dst_x, dst_y, tilew, tileh);
+
+				// Lower (terrain) sprite.
+				if (hasLower) {
+					var lpos = atlasMap[lkey];
+					ctx.drawImage(atlasImg, lpos[0], lpos[1], atlasTW, atlasTH,
+					              dst_x, dst_y, tilew, tileh);
+				}
+
+				// Upper (entity / item) sprite.
+				if (hasUpper) {
+					var upos = atlasMap[ukey];
+					ctx.drawImage(atlasImg, upos[0], upos[1], atlasTW, atlasTH,
+					              dst_x, dst_y, tilew, tileh);
+				}
+				continue;
+			}
+			// Fall through to CP437 rendering below.
+		}
+
+		// --- CP437 text path (unchanged from original) ---
 		var bg_x = ((bg % 4) * tilew2) + 15 * tilew;
 		var bg_y = (Math.floor(bg / 4) * tileh2) + 15 * tileh;
 		ctx.drawImage(cd,
-				bg_x, bg_y, tilew, tileh,
-				x * tilew, y * tileh, tilew, tileh);
+			bg_x, bg_y, tilew, tileh,
+			x * tilew, y * tileh, tilew, tileh);
 
 		if (data[k + 3] & 64) {
 			t.push(k);
@@ -206,8 +333,8 @@ function renderUpdate(ctx, data, offset) {
 		var fg_x = (s % 16) * tilew + ((fg % 4) * tilew2);
 		var fg_y = Math.floor(s / 16) * tileh + (Math.floor(fg / 4) * tileh2);
 		ctx.drawImage(cd,
-				fg_x, fg_y, tilew, tileh,
-				x * tilew, y * tileh, tilew, tileh);
+			fg_x, fg_y, tilew, tileh,
+			x * tilew, y * tileh, tilew, tileh);
 	}
 
 	for (var m = 0; m < t.length; m++) {
@@ -215,15 +342,15 @@ function renderUpdate(ctx, data, offset) {
 		x = data[k + 0];
 		y = data[k + 1];
 
-		s = data[k + 2];
+		s  = data[k + 2];
 		bg = data[k + 3];
 		fg = data[k + 4];
 
 		var i = (s % 16) * tilew + ((fg % 4) * tilew2);
 		var j = Math.floor(s / 16) * tileh + (Math.floor(fg / 4) * tileh2);
 		ctx.drawImage(ct,
-				i, j, tilew, tileh,
-				x * tilew, y * tileh, tilew, tileh);
+			i, j, tilew, tileh,
+			x * tilew, y * tileh, tilew, tileh);
 	}
 }
 
@@ -236,44 +363,66 @@ function onMessage(evt) {
 		var gameStatus = {};
 		gameStatus.playerCount = data[1] & 127;
 
+		// [2] bits — same meaning as before
 		gameStatus.isActive   = (data[2] & 1) !== 0;
 		gameStatus.isNoPlayer = (data[2] & 2) !== 0;
 		gameStatus.ingameTime = (data[2] & 4) !== 0;
+		var graphicsMode      = (data[2] & 8) !== 0;
+		// Atlas version is in bits[4..7]. Re-fetch when it changes.
+		var atlasVersion = (data[2] >> 4) & 0x0F;
+		if (atlasVersion !== lastAtlasVersion) {
+			lastAtlasVersion = atlasVersion;
+			loadAtlas();
+		}
 
+		// [3] flags2: bit 0 = non-dwarfmode screen active (menu/dialog)
+		isInMenu = (data[3] & 1) !== 0;
+
+		// [4-7] time left (was [3-6])
 		gameStatus.timeLeft =
-			(data[3]<<0) |
-			(data[4]<<8) |
-			(data[5]<<16) |
-			(data[6]<<24);
+			(data[4]<<0) |
+			(data[5]<<8) |
+			(data[6]<<16) |
+			(data[7]<<24);
 
-		// FIXME: we shouldn't need resize data
-		var neww = data[7] * tilew;
-		var newh = data[8] * tileh;
-		var newDimx = data[7];
-		var newDimy = data[8];
+		// [8-9] game dimensions (was [7-8])
+		var neww = data[8] * tilew;
+		var newh = data[9] * tileh;
+		var newDimx = data[8];
+		var newDimy = data[9];
 		if (newDimx > 0) { dimx = newDimx; dimy = newDimy; }
 
 		// Resize canvas to match the reported DF screen dimensions.
-		// Modern DF (Steam release) uses grids much larger than the old
-		// 80x25 default, so the hardcoded canvas size in HTML would clip.
 		if (neww > 0 && newh > 0 &&
 		    (canvas.width !== neww || canvas.height !== newh)) {
 			canvas.width  = neww;
 			canvas.height = newh;
-			lastConstraint = null;   // force CSS fit recompute below
+			lastConstraint = null;
 			fitCanvasToParent();
 		}
 
-		var nickSize = data[9];
-		// this only works because we know the input is uri-encoded ascii
+		// [10-15] per-client camera position: cam_x, cam_y, cam_z (int16_t LE)
+		var rawCx = data[10] | (data[11] << 8);
+		if (rawCx & 0x8000) rawCx -= 0x10000;
+		var rawCy = data[12] | (data[13] << 8);
+		if (rawCy & 0x8000) rawCy -= 0x10000;
+		var rawCz = data[14] | (data[15] << 8);
+		if (rawCz & 0x8000) rawCz -= 0x10000;
+		camX = rawCx; camY = rawCy; camZ = rawCz;
+		updateCameraHud();
+
+		// [16] nick length (was [9])
+		var nickSize = data[16];
+		// [17..16+nickSize] active player nick (was [10..9+nickSize])
 		var activeNick = "";
-		for (var i = 10; (i < 10 + nickSize) && data[i] !== 0; i++) {
+		for (var i = 17; (i < 17 + nickSize) && data[i] !== 0; i++) {
 			activeNick += String.fromCharCode(data[i]);
 		}
 		gameStatus.currentPlayer = decodeURIComponent(activeNick);
 
 		renderQueueStatus(gameStatus);
-		renderUpdate(ctx, data, nickSize+10);
+		// Tile data starts at 17+nickSize (was 10+nickSize)
+		renderUpdate(ctx, data, nickSize+17, graphicsMode);
 
 		var now = performance.now();
 		var nextFrame = (1000 / MAX_FPS) - (now - lastFrame);
@@ -326,6 +475,12 @@ function onMessage(evt) {
 				}
 			}
 		}
+	} else if (data[0] === cmd.mapInfo && data.length >= 7) {
+		// Opcode 118: map dimensions in tiles.
+		// Format: [118, map_x lo, hi, map_y lo, hi, map_z lo, hi]
+		mapW = data[1] | (data[2] << 8);
+		mapH = data[3] | (data[4] << 8);
+		mapD = data[5] | (data[6] << 8);
 	}
 }
 
@@ -444,6 +599,8 @@ document.onkeydown = function(ev) {
 	}
 
 	if (ev.keyCode < 65) {
+		// Non-alpha key: only the focus player sends game input.
+		if (!active) { ev.preventDefault(); return; }
 		var mod = (ev.shiftKey << 1) | (ev.ctrlKey << 2) | ev.altKey;
 		var data = new Uint8Array([cmd.sendKey, ev.keyCode, 0, mod]);
 		logKeyCode(ev);
@@ -455,6 +612,27 @@ document.onkeydown = function(ev) {
 };
 
 document.onkeypress = function(ev) {
+	var ch = ev.charCode;
+	// WASD camera routing.
+	// Route to camera when: we are NOT the active player, OR we are the
+	// active player but no menu/dialog is open.
+	var routeToCamera = !active || !isInMenu;
+	if (routeToCamera && (ch === 119 || ch === 87)) { // w/W — pan up
+		sendCamMove(0, -10, 0); ev.preventDefault(); return;
+	}
+	if (routeToCamera && (ch === 115 || ch === 83)) { // s/S — pan down
+		sendCamMove(0,  10, 0); ev.preventDefault(); return;
+	}
+	if (routeToCamera && (ch === 97  || ch === 65)) { // a/A — pan left
+		sendCamMove(-10, 0, 0); ev.preventDefault(); return;
+	}
+	if (routeToCamera && (ch === 100 || ch === 68)) { // d/D — pan right
+		sendCamMove( 10, 0, 0); ev.preventDefault(); return;
+	}
+
+	// Only the focus player can send game input.
+	if (!active) { ev.preventDefault(); return; }
+
 	var mod = (ev.shiftKey << 1) | (ev.ctrlKey << 2) | ev.altKey;
 	var data = new Uint8Array([cmd.sendKey, 0, ev.charCode, mod]);
 	logCharCode(ev);
@@ -480,6 +658,14 @@ function fitCanvasToParent() {
 	if (cursorCanvas) {
 		cursorCanvas.style.width  = canvas.style.width;
 		cursorCanvas.style.height = canvas.style.height;
+	}
+}
+
+// Update the camera position HUD overlay (if present in the HTML).
+function updateCameraHud() {
+	var hud = document.getElementById('cameraHud');
+	if (hud) {
+		hud.textContent = 'X:' + camX + ' Y:' + camY + ' Z:' + camZ;
 	}
 }
 
@@ -515,8 +701,11 @@ canvas.addEventListener('mousemove', function(ev) {
 	lastMouseSend = now;
 	var tile = canvasToTile(ev);
 	sendMouseEvent(MOUSE_MOVE, tile, 0);
-	// Also send ghost cursor position for all players (server decides what to do with it).
-	if (websocket && websocket.readyState === WebSocket.OPEN) {
+	// Send ghost cursor only when NOT the active player.
+	// When active, the cursor is already tracked server-side via gps->mouse_x/y
+	// (opcode 113). Sending opcode 114 while active causes the stale cursor_active
+	// flag to linger after losing focus, producing a frozen ghost cursor.
+	if (!active && websocket && websocket.readyState === WebSocket.OPEN) {
 		websocket.send(new Uint8Array([cmd.cursorMove, tile[0], tile[1]]));
 	}
 	ev.preventDefault();
@@ -535,9 +724,17 @@ canvas.addEventListener('mouseup', function(ev) {
 });
 
 canvas.addEventListener('wheel', function(ev) {
-	var type = ev.deltaY > 0 ? MOUSE_WHEEL : MOUSE_WHEEL;
-	var btn  = ev.deltaY > 0 ? 5 : 4; // 4=up 5=down (scroll directions)
-	sendMouseEvent(type, canvasToTile(ev), btn);
+	// Context-aware scroll routing:
+	// Focus player + menu open  → game scroll (opcode 113 MOUSE_WHEEL)
+	// All other cases           → camera Z movement (opcode 117 CamMove)
+	if (active && isInMenu) {
+		var btn = ev.deltaY > 0 ? 5 : 4; // 4=scroll-up 5=scroll-down
+		sendMouseEvent(MOUSE_WHEEL, canvasToTile(ev), btn);
+	} else {
+		// Scroll up (deltaY < 0) = move toward sky (higher z in DF).
+		var dz = ev.deltaY < 0 ? 1 : -1;
+		sendCamMove(0, 0, dz);
+	}
 	ev.preventDefault();
 }, { passive: false });
 
