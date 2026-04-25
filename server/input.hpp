@@ -1,15 +1,15 @@
 /*
- * input.hpp — Phase 3 key-injection bridge.
+ * input.hpp — key and mouse injection bridge.
  *
- * The websocket thread calls simkey() from server.cpp's on_message(). That
- * would be unsafe if we called into DF directly (viewscreen state is only
- * valid from the DF main thread), so instead we push a compact event onto
- * a mutex-protected queue. The DF main thread drains it in plugin_onupdate
- * via wf_flush_input_queue() and dispatches each event by calling
- * Gui::getCurViewscreen()->feed_key(df::interface_key).
+ * The WebSocket thread calls simkey() / simmouse() from server.cpp's
+ * on_message(). Calling into DF directly from that thread is unsafe
+ * (viewscreen state is only valid from the DF main thread), so we push a
+ * compact event onto a mutex-protected queue. The DF main thread drains it
+ * in plugin_onupdate via wf_flush_input_queue() / wf_flush_mouse_queue(),
+ * which translate each event into SDL key/mouse events pushed into DF's
+ * own event queue via DFHack::DFSDL::DFSDL_PushEvent().
  *
- * The signature of simkey() is preserved so server.cpp (which still speaks
- * the old SDL-inspired `SDL::Key` vocabulary) does not need changes.
+ * The SDL::Key vocabulary is preserved so server.cpp does not need changes.
  */
 #pragma once
 

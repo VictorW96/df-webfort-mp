@@ -6,7 +6,6 @@
 /*jslint browser:true */
 
 var params = getParams();
-// TODO: tag colors
 var colors = [
 	32, 39, 49,
 	0, 106, 255,
@@ -28,7 +27,8 @@ var colors = [
 
 var MAX_FPS = 20;
 
-// Sprite atlas loaded from /atlas.png + /atlas.json.
+// Sprite atlas for graphics mode (USE_GRAPHICS=true).
+// Not used in ASCII/curses mode — atlas is never fetched when graphicsMode is false.
 // atlasImg  – HTMLImageElement (or null if not loaded yet)
 // atlasMap  – object: texpos_string → [atlas_x, atlas_y]
 // atlasTW   – sprite pixel width in the atlas
@@ -38,7 +38,7 @@ var atlasMap = null;
 var atlasTW  = 16;
 var atlasTH  = 16;
 // Last atlas version counter received from the server (bits[4..7] of tock byte[2]).
-// When it changes we re-fetch atlas.png/atlas.json.
+// When it changes we re-fetch atlas.png/atlas.json (graphics mode only).
 var lastAtlasVersion = -1;
 var atlasLoading = false;
 
@@ -53,8 +53,8 @@ var secret = params.secret;
 var wsUri = 'ws://' + host + ':' + port +
 	'/' + encodeURIComponent(nick) +
 	'/' + encodeURIComponent(secret);
-console.log(wsUri);
 var active = false;
+var websocket = null;
 // True when the server reports a non-dwarfmode screen is active (menus,
 // dialogs, setup screens). Used to route WASD and scroll to camera vs. game.
 var isInMenu = false;
@@ -64,7 +64,6 @@ var camX = 0, camY = 0, camZ = 0;
 var mapW = 0, mapH = 0, mapD = 0;
 var lastFrame = 0;
 
-var tilewh = 16; // TODO: remove vars
 var tilew  = 16;
 var tileh  = 16;
 var dimx   = 80;
@@ -143,8 +142,9 @@ function setStatus(text, color, onclick) {
 	st.style.backgroundColor = color;
 }
 
-// Fetch the sprite atlas from the server. Called on connect and whenever
-// the atlas version counter in the tock() header changes (world load, mode switch).
+// Fetch the sprite atlas from the server.
+// Only called in graphics mode (USE_GRAPHICS=true). Never called in ASCII mode.
+// Triggered by atlas version counter changes in tock() (world load, mode switch).
 // Retries every 3 seconds until the atlas is ready (builds after ~60 ticks).
 function loadAtlas() {
 	if (atlasLoading) return;
@@ -200,15 +200,11 @@ function onOpen(evt) {
 	websocket.send(new Uint8Array([cmd.connect]));
 	websocket.send(new Uint8Array([cmd.update]));
 	websocket.onmessage = onMessage;
-
-	// Fetch sprite atlas in background; rendering falls back to CP437 until ready.
-	loadAtlas();
+	// Atlas is fetched lazily on the first tock that reports graphicsMode=true.
 }
 
 var isError = false;
 function onClose(evt) {
-	console.log("Disconnect code #" + evt.code + ", reason: " + evt.reason);
-	console.log(isError);
 	if (isError) {
 		isError = false;
 		setStatus('Connection Error. Click to retry', 'red', connect);
@@ -220,7 +216,6 @@ function onClose(evt) {
 }
 
 function onError(ev) {
-	console.log("error triggered.");
 	isError = true;
 }
 
@@ -255,7 +250,6 @@ function renderQueueStatus(s) {
 	setStats(s.playerCount, s.ingameTime, s.timeLeft);
 }
 
-// TODO: document, split
 function renderUpdate(ctx, data, offset, graphicsMode) {
 	var t = [];
 	var k;
@@ -264,8 +258,10 @@ function renderUpdate(ctx, data, offset, graphicsMode) {
 	var s;
 	var bg;
 	var fg;
-	var tilew2 = tilew * tilew;
-	var tileh2 = tileh * tileh;
+	// zoneW/zoneH: pixel size of one color zone in the 1024×1024 colorized
+	// tileset canvas (16 tiles × tilew pixels = 256 for standard 16px tiles).
+	var zoneW = tilew * tilew;
+	var zoneH = tileh * tileh;
 
 	for (k = offset; k < data.length; k += 9) {
 		x = data[k + 0];
@@ -278,10 +274,12 @@ function renderUpdate(ctx, data, offset, graphicsMode) {
 		var texpos       = data[k + 5] | (data[k + 6] << 8);
 		var texpos_lower = data[k + 7] | (data[k + 8] << 8);
 
-		// --- Sprite path: graphical mode with a real sprite texpos ---
+		// Sprite path: graphical mode with a real sprite texpos.
 		// In ASCII/curses mode graphicsMode is false and we always use CP437.
 		// In graphical mode we use the atlas for any tile with texpos > 0;
 		// tiles with texpos == 0 (pure text/UI) fall through to the CP437 path.
+		// Falls back to CP437 if the texpos is not in the atlas (e.g. during
+		// an atlas rebuild after a world load).
 		if (graphicsMode && texpos > 0 && atlasImg && atlasMap) {
 			var dst_x = x * tilew;
 			var dst_y = y * tileh;
@@ -297,8 +295,8 @@ function renderUpdate(ctx, data, offset, graphicsMode) {
 			// the map isn't blank during the rebuild window.
 			if (hasLower || hasUpper) {
 				// Draw background color for transparent sprite regions.
-				var bg_x = ((bg % 4) * tilew2) + 15 * tilew;
-				var bg_y = (Math.floor(bg / 4) * tileh2) + 15 * tileh;
+				var bg_x = ((bg % 4) * zoneW) + 15 * tilew;
+				var bg_y = (Math.floor(bg / 4) * zoneH) + 15 * tileh;
 				ctx.drawImage(cd, bg_x, bg_y, tilew, tileh, dst_x, dst_y, tilew, tileh);
 
 				// Lower (terrain) sprite.
@@ -319,9 +317,9 @@ function renderUpdate(ctx, data, offset, graphicsMode) {
 			// Fall through to CP437 rendering below.
 		}
 
-		// --- CP437 text path (unchanged from original) ---
-		var bg_x = ((bg % 4) * tilew2) + 15 * tilew;
-		var bg_y = (Math.floor(bg / 4) * tileh2) + 15 * tileh;
+		// --- CP437 text path ---
+		var bg_x = ((bg % 4) * zoneW) + 15 * tilew;
+		var bg_y = (Math.floor(bg / 4) * zoneH) + 15 * tileh;
 		ctx.drawImage(cd,
 			bg_x, bg_y, tilew, tileh,
 			x * tilew, y * tileh, tilew, tileh);
@@ -330,8 +328,8 @@ function renderUpdate(ctx, data, offset, graphicsMode) {
 			t.push(k);
 			continue;
 		}
-		var fg_x = (s % 16) * tilew + ((fg % 4) * tilew2);
-		var fg_y = Math.floor(s / 16) * tileh + (Math.floor(fg / 4) * tileh2);
+		var fg_x = (s % 16) * tilew + ((fg % 4) * zoneW);
+		var fg_y = Math.floor(s / 16) * tileh + (Math.floor(fg / 4) * zoneH);
 		ctx.drawImage(cd,
 			fg_x, fg_y, tilew, tileh,
 			x * tilew, y * tileh, tilew, tileh);
@@ -346,8 +344,8 @@ function renderUpdate(ctx, data, offset, graphicsMode) {
 		bg = data[k + 3];
 		fg = data[k + 4];
 
-		var i = (s % 16) * tilew + ((fg % 4) * tilew2);
-		var j = Math.floor(s / 16) * tileh + (Math.floor(fg / 4) * tileh2);
+		var i = (s % 16) * tilew + ((fg % 4) * zoneW);
+		var j = Math.floor(s / 16) * tileh + (Math.floor(fg / 4) * zoneH);
 		ctx.drawImage(ct,
 			i, j, tilew, tileh,
 			x * tilew, y * tileh, tilew, tileh);
@@ -368,24 +366,30 @@ function onMessage(evt) {
 		gameStatus.isNoPlayer = (data[2] & 2) !== 0;
 		gameStatus.ingameTime = (data[2] & 4) !== 0;
 		var graphicsMode      = (data[2] & 8) !== 0;
-		// Atlas version is in bits[4..7]. Re-fetch when it changes.
+		// Atlas version is in bits[4..7]. Re-fetch only in graphics mode.
+		// In ASCII mode the atlas is never fetched to avoid spurious 404 errors.
 		var atlasVersion = (data[2] >> 4) & 0x0F;
-		if (atlasVersion !== lastAtlasVersion) {
+		if (graphicsMode && atlasVersion !== lastAtlasVersion) {
 			lastAtlasVersion = atlasVersion;
 			loadAtlas();
+		} else if (!graphicsMode) {
+			// Clear stale atlas state when switching back to ASCII mode.
+			lastAtlasVersion = -1;
+			atlasImg = null;
+			atlasMap = null;
 		}
 
 		// [3] flags2: bit 0 = non-dwarfmode screen active (menu/dialog)
 		isInMenu = (data[3] & 1) !== 0;
 
-		// [4-7] time left (was [3-6])
+		// [4-7] time left, in seconds. -1 if no timer.
 		gameStatus.timeLeft =
 			(data[4]<<0) |
 			(data[5]<<8) |
 			(data[6]<<16) |
 			(data[7]<<24);
 
-		// [8-9] game dimensions (was [7-8])
+		// [8-9] game dimensions
 		var neww = data[8] * tilew;
 		var newh = data[9] * tileh;
 		var newDimx = data[8];
@@ -411,9 +415,9 @@ function onMessage(evt) {
 		camX = rawCx; camY = rawCy; camZ = rawCz;
 		updateCameraHud();
 
-		// [16] nick length (was [9])
+		// [16] nick length
 		var nickSize = data[16];
-		// [17..16+nickSize] active player nick (was [10..9+nickSize])
+		// [17..16+nickSize] active player nick
 		var activeNick = "";
 		for (var i = 17; (i < 17 + nickSize) && data[i] !== 0; i++) {
 			activeNick += String.fromCharCode(data[i]);
@@ -421,7 +425,7 @@ function onMessage(evt) {
 		gameStatus.currentPlayer = decodeURIComponent(activeNick);
 
 		renderQueueStatus(gameStatus);
-		// Tile data starts at 17+nickSize (was 10+nickSize)
+		// Tile data starts at 17+nickSize
 		renderUpdate(ctx, data, nickSize+17, graphicsMode);
 
 		var now = performance.now();
@@ -484,7 +488,6 @@ function onMessage(evt) {
 	}
 }
 
-// FIXME: tilewh-ify
 function colorize(img, cnv) {
 	var ctx3 = cnv.getContext('2d');
 
@@ -521,7 +524,7 @@ function colorize(img, cnv) {
 	}
 }
 
-// Crazy closures, Batman, what's going on here?
+// Returns a loader callback; calls init() when all pending loads complete.
 var make_loader = function() {
 	var loading = 0;
 	return function() {
@@ -603,11 +606,10 @@ document.onkeydown = function(ev) {
 		if (!active) { ev.preventDefault(); return; }
 		var mod = (ev.shiftKey << 1) | (ev.ctrlKey << 2) | ev.altKey;
 		var data = new Uint8Array([cmd.sendKey, ev.keyCode, 0, mod]);
-		logKeyCode(ev);
 		websocket.send(data);
 		ev.preventDefault();
 	} else {
-		lastKeyCode = ev.keyCode;
+		// ignore: alpha keys are handled by onkeypress
 	}
 };
 
@@ -635,7 +637,6 @@ document.onkeypress = function(ev) {
 
 	var mod = (ev.shiftKey << 1) | (ev.ctrlKey << 2) | ev.altKey;
 	var data = new Uint8Array([cmd.sendKey, 0, ev.charCode, mod]);
-	logCharCode(ev);
 	websocket.send(data);
 
 	if (ev.stopPropagation) {

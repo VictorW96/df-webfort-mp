@@ -16,6 +16,5 @@ var config = {
 	nick: "",
 	secret: "",
 	colors: undefined,
-	hide_chat: undefined,
 	show_fps: undefined
 };

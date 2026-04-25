@@ -30,7 +30,7 @@ struct Client {
     int cursor_y;
     bool cursor_active;
 
-    // Per-client camera (Phase 5 multiplayer — independent viewports).
+    // Per-client camera for independent viewports.
     // cam_x/y/z hold this client's viewport tile offset; initialized
     // from the global window_x/y/z when the client connects.
     // has_own_cam is set true on the first CamMove opcode (opcode 117)

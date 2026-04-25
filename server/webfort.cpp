@@ -1,30 +1,22 @@
 /*
- * webfort.cpp — Phase 4 port for DFHack 53.12
+ * webfort.cpp — DFHack 53.12 plugin entry point.
  *
- * Changes from Phase 2/3:
- *   - Post-render capture: capture_screen_buffer() is now called from
- *     DEFINE_VMETHOD_INTERPOSE hooks on viewscreen::render() so the screen
- *     snapshot always reflects the CURRENT frame (cursor position, hover
- *     tooltips, designation overlays) rather than the previous one.
- *   - Persistent hover: plugin_onupdate feeds an empty keyset every tick
- *     while a virtual cursor is active, keeping button highlights/tooltips
- *     alive between explicit mouse-move events.
- *   - Correct precise_mouse coords: uses init->display.grid_x/y (tile pixel
- *     size) to compute the pixel-center of the hovered tile instead of the
- *     hardcoded value of 8.
+ * Reads gps->screen (and screen_top / screentexpos overlays) each tick,
+ * composes the three DF rendering paths into the shared `sc` buffer, and
+ * serves it to connected browser clients via the WebSocket server in
+ * server.cpp.  Input events received on the WebSocket thread are queued
+ * here and drained on the DF main thread to avoid data races.
  *
- * Earlier changes (Phase 2/3):
- *   - df::global::ui → df::global::plotinfo (renamed upstream)
- *   - Removed references to viewscreens that no longer exist in 53.12
- *     (viewscreen_layer_export_play_mapst, viewscreen_overallstatusst,
- *     viewscreen_movieplayerst).
- *   - Dropped the df::renderer subclass entirely. The current df::renderer
- *     has a very different field list and a 25-method vtable; subclassing
- *     it in-tree is fragile. Instead we copy gps->screen into the shared
- *     `sc` buffer on each plugin_onupdate tick. gps itself is unchanged
- *     from the old API in the respects webfort cares about.
- *   - Server start/stop lives in plugin_enable() (matches modern plugin
- *     conventions where plugin_init registers but does not activate).
+ * Screen capture: capture_screen_buffer() is called from plugin_onupdate
+ * after both viewscreen::render() and DFHack overlay widgets have run,
+ * so the snapshot always includes the fully composited frame.
+ *
+ * Mouse: virtual cursor coords are stamped into gps->mouse_x/y via
+ * DEFINE_VMETHOD_INTERPOSE hooks before each render, and re-stamped
+ * every tick in plugin_onupdate to keep hover state alive.
+ *
+ * Server lifecycle: plugin_enable() starts/stops the WebSocket server;
+ * plugin_init() registers globals but does not start the server.
  */
 
 #include <cassert>
@@ -49,7 +41,6 @@
 #include "modules/Gui.h"
 #include "modules/Maps.h"
 #include "modules/Screen.h"
-#include "modules/World.h"
 
 #include <SDL_events.h>
 #include <SDL_keyboard.h>
@@ -105,21 +96,20 @@ REQUIRE_GLOBAL(window_z);
 REQUIRE_GLOBAL(world);
 
 // -----------------------------------------------------------------------------
-// Render hooks (Phase 4) — mouse stamping only
+// Render hooks — virtual mouse stamping
 //
 // Priority 200 > DFHack overlay plugin's priority 100:
 //   webfort(200) → overlay(100) → native render()
 //
 // These hooks do NOT capture the screen. DF's graphics.cpp calls:
 //   1. currentscreen->render(curtick)      ← vtable chain, hooks fire here
-//   2. currentscreen->widgets.render()     ← DFHack overlay widgets (Stocks
-//                                            dialog, sidebar help, etc.) draw HERE
+//   2. currentscreen->widgets.render()     ← DFHack overlay widgets draw HERE
 // Any vtable-hook capture would miss the widgets.render() content.
 //
 // Instead, plugin_onupdate captures after both calls have completed. In DF's
 // async_loop, the render command (render_things) is always processed BEFORE
-// mainloop() runs for the same frame, so the fallback in plugin_onupdate sees
-// the fully composited gps->screen including all overlay widgets.
+// mainloop() runs for the same frame, so plugin_onupdate sees the fully
+// composited gps->screen including all overlay widgets.
 //
 // The hooks' only job is to stamp the virtual mouse coordinates into gps
 // BEFORE INTERPOSE_NEXT, so DF's render code reads our coords (not the
@@ -206,9 +196,6 @@ std::atomic<int32_t> g_active_cam_dz{0};
 uint8_t g_atlas_version = 0;
 static int32_t sc_prev_dimx = -1;
 static int32_t sc_prev_dimy = -1;
-int newwidth = 0;
-int newheight = 0;
-volatile bool needsresize = false;
 
 static WFServer* s_hdl = nullptr;
 
@@ -241,20 +228,6 @@ bool is_safe_to_escape()
 void show_announcement(std::string announcement)
 {
     DFHack::Gui::showAnnouncement(announcement);
-}
-
-static bool is_dwarf_mode()
-{
-    t_gamemodes gm;
-    World::ReadGameMode(gm);
-    return gm.g_mode == df::game_mode::DWARF;
-}
-
-void deify(DFHack::color_ostream* raw_out, std::string nick)
-{
-    if (is_dwarf_mode()) {
-        Core::getInstance().runCommand(*raw_out, "webfort/deify " + nick);
-    }
 }
 
 void quicksave(DFHack::color_ostream* out)
@@ -765,10 +738,10 @@ static void wf_build_atlas()
 }
 
 // -----------------------------------------------------------------------------
-// Phase 3: input injection. The websocket thread pushes events via simkey()
-// (in input.hpp); we drain them here, on the DF main thread, translating
-// each event to a df::interface_key and feeding it into the current
-// viewscreen.
+// Input injection.
+// The WebSocket thread pushes events via simkey() / simmouse() (input.hpp);
+// we drain them here on the DF main thread and translate each event into
+// SDL key/mouse events pushed into DF's own event queue.
 // -----------------------------------------------------------------------------
 
 std::mutex               g_wf_input_mutex;
@@ -1017,7 +990,7 @@ DFhackCExport command_result plugin_init(color_ostream &out,
     }
 
     s_hdl = new WFServer(out);
-    out.print("webfort: Phase 2 loaded (server off; run `enable webfort`).\n");
+    out.print("webfort: loaded (server off; run `enable webfort`).\n");
     return CR_OK;
 }
 
@@ -1135,7 +1108,7 @@ DFhackCExport command_result plugin_onupdate(color_ostream& /*out*/)
     // fully composited frame including all DFHack overlay widgets.
     capture_screen_buffer();
 
-    // Per-client extra render passes for independent viewports (Phase 5).
+    // Per-client extra render passes for independent viewports.
     // Clients that have sent at least one CamMove opcode have has_own_cam=true
     // and get a separate render pass at their cam_x/y/z position each tick.
     // We save and restore the global viewport so the main game loop is unaffected.

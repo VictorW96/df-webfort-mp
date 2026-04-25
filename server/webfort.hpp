@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 
-void deify(DFHack::color_ostream* raw_out, std::string nick);
 void quicksave(DFHack::color_ostream* out);
 
 // sc[] layout: 8 bytes per tile
@@ -28,9 +27,6 @@ void quicksave(DFHack::color_ostream* out);
 //   [6]   screentexpos_lower low byte
 //   [7]   screentexpos_lower high byte
 extern unsigned char sc[256*256*8];
-
-extern int newwidth, newheight;
-extern volatile bool needsresize;
 
 // Sprite atlas — built from enabler->textures.raws in wf_build_atlas().
 // g_atlas_mutex must be held when reading these from the HTTP thread.
@@ -46,7 +42,7 @@ extern uint8_t g_atlas_version;
 // Updated every tick. The browser reads this from the tock() mode byte.
 extern bool g_graphics_mode;
 
-// Set true during per-client extra render passes (Phase 5 multiplayer).
+// Set true during per-client extra render passes.
 // Render hooks check this to skip mouse stamping during extra passes.
 extern bool g_wf_in_extra_render;
 

@@ -77,7 +77,6 @@ getParams = (function() {
 		var params_url = getJsonFromUrl();
 
 		params = merge(config, params_stored, params_url);
-		console.log(params);
 
 		if (params.store) {
 			delete params.store;

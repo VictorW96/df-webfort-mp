@@ -12,7 +12,6 @@ for debug purposes. here are all of them:
 | `tiles`     | an image in `art/`  | `Spacefox_16x16.png` | The tileset to use.                       |
 | `text`      | an image in `art/`  | `ShizzleClean.png`   | the tileset to use for ingame text.       |
 | `show-fps`  | a boolean           | false                | Whether or not to show the FPS counter.   |
-| `hide-chat` | a boolean           | false                | Whether or not to hide the IRC side pane. |
 | `colors`    | a file in `colors/` | default colorscheme  | The colorscheme to use, in json format.   |
 | `nick`      | any string          | random               | The nickname to use                       |
 | `store`     | a boolean           | undefined            | if true, store all current settings       |
@@ -38,10 +37,9 @@ Here, `param1` is set to `1`, and `param2` is set to `2`.
 
 A real world example:
 
-	http://<your host>/webfort.html?nick=Urist&hide-chat&tiles=ShizzleClean.png
+	http://<your host>/webfort.html?nick=Urist&tiles=ShizzleClean.png
 
-Will set your `nick` to Urist, hide the chat pane, and set the tileset
-to `ShizzleClean.png`.
+Will set your `nick` to Urist and set the tileset to `ShizzleClean.png`.
 
 Parameters can be stored into your browser's `localStorage`, where they can
 persist between sessions. for example, opening:

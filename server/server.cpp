@@ -201,8 +201,7 @@ void set_active(conn_hdl newc)
         if (newcl->nick == "") {
             ss << "A wandering spirit";
         } else {
-            deify(raw_out, newcl->nick);
-            ss << "The spirit " << newcl->nick;
+        ss << "The spirit " << newcl->nick;
         }
         ss << " has seized control.";
         show_announcement(ss.str());
@@ -665,13 +664,7 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
     auto str = msg->get_payload();
     const unsigned char *mdata = (const unsigned char*) str.c_str();
     int msz = str.size();
-    if (mdata[0] == 112 && msz == 3) { // ResizeEvent
-        if (hdl == active_conn) {
-            newwidth = mdata[1];
-            newheight = mdata[2];
-            needsresize = true;
-        }
-    } else if (mdata[0] == 111 && msz == 4) { // KeyEvent
+    if (mdata[0] == 111 && msz == 4) { // KeyEvent
         // Only the focus (active) player can send game input.
         // Non-focus clients use opcode 117 (CamMove) to pan their viewport.
         if (hdl != active_conn)
@@ -783,7 +776,6 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
             }
         }
     } else if (mdata[0] == 116) { // requestTurn
-        assert(active_conn == active_conn);
         assert(hdl != null_conn);
         if (hdl == active_conn) {
             set_active(null_conn);
@@ -795,11 +787,6 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
     }
 
     return;
-}
-
-void on_init(conn_hdl hdl, asio::ip::tcp::socket & s)
-{
-    s.set_option(asio::ip::tcp::no_delay(true));
 }
 
 void wsloop(void *a_srv)
@@ -870,9 +857,6 @@ void WFServerImpl::start()
         srv.get_alog().set_ostream(logstream);
 
         stage = "set_handlers";
-        // Note: socket_init_handler is invoked during connection init_asio
-        // (before the socket is opened) in websocketpp >= 0.8, so we cannot
-        // call set_option(no_delay) here. Skip on_init registration.
         srv.set_http_handler(bind(&on_http, &srv, ::_1));
         srv.set_validate_handler(bind(&validate_open, &srv, ::_1));
         srv.set_open_handler(bind(&on_open, &srv, ::_1));

@@ -2,11 +2,6 @@ get_directory_property(isPlugin PARENT_DIRECTORY)
 
 project(webfort)
 
-# ----------------------------------------------------------------------------
-# Phase 2 port: WebSocket server + direct screen capture. Input injection
-# (input.hpp) is still stubbed — finalized in Phase 3.
-# ----------------------------------------------------------------------------
-
 set(SRC
     webfort.cpp
     server.cpp
