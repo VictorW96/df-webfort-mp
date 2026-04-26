@@ -1,3 +1,0 @@
-[submodule "server/websocketpp"]
-	path = server/websocketpp
-	url = https://github.com/zaphoyd/websocketpp.git
