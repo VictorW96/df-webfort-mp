@@ -47,6 +47,91 @@ Available tilesets (in `web/art/`): `Curses.png`, `Phoebus.png`, `Mayday.png`, `
 
 See [INSTALLING.txt](INSTALLING.txt) for port forwarding and other details.
 
+### Architecture (DF v50+ / Steam release) ###
+
+This fork makes several structural changes relative to the original
+[df-webfort](https://github.com/mifki/df-webfort) and the intermediate
+[Ankoku fork](https://github.com/Ankoku/df-webfort), all driven by breaking
+changes in Dwarf Fortress 50+.
+
+#### Screen capture — `gps->screen` polling instead of renderer subclassing
+
+Older builds subclassed `df::renderer` (via `renderer_wrap.hpp`) and
+intercepted rendering calls at the OpenGL/SDL-blit level.  The `df::renderer`
+vtable was overhauled in DF v50 and no longer has the same hook points, so
+that approach no longer compiles or works.
+
+This fork instead polls `gps->screen` directly in `plugin_onupdate`, *after*
+both the active viewscreen's `render()` and DFHack's overlay widgets have
+run.  That ordering is guaranteed by DF's own async render loop, so the
+snapshot always includes the fully-composited frame.
+
+#### Three-path tile compositing
+
+DF 53.12 writes tile data through three separate buffers that must be merged:
+
+1. **`gps->screen` / `addchar`** — the primary buffer; each tile is 8 bytes
+   (`[char, fg_R, fg_G, fg_B, bg_R, bg_G, bg_B, pad]`).
+2. **`gps->screentexpos` / `add_tile`** — a parallel array of texture-atlas
+   slot indices used for graphical map sprites and dialog border glyphs.
+   Tiles that use this path leave `screen[0]` as 0 or space.  The plugin
+   reverse-maps each slot back to a CP437 character using
+   `init->font.large_font_texpos[]`.
+3. **`gps->screen_top`** — a second full-screen overlay for dialog paragraph
+   text.  Only tiles where `screen_top[0] > 32` are composited on top of the
+   base screen, so border characters resolved by path 2 are not overwritten.
+
+Pre-v50 builds only had to read a single flat screen buffer with one-byte
+color indices; the three-path merge is entirely new to this fork.
+
+#### Color representation — RGB to indexed
+
+In DF v50+ the screen array stores raw RGB triples per tile instead of the
+16-color CGA indices the wire protocol uses.  The plugin reverse-maps each
+RGB triple against `gps->uccolor` (the CGA palette DF derives its colors
+from) with a nearest-neighbor search so the existing client-side palette
+logic is preserved unchanged.
+
+#### Virtual mouse — vtable interpose hooks + `gps->precise_mouse_*`
+
+The old plugin wrote directly to the SDL mouse state.  DF v50 added a
+separate `gps->mouse_x/y` (tile-level) and `gps->precise_mouse_x/y`
+(pixel-level) pair that the game reads instead of polling SDL.  This fork
+stamps those fields via `DEFINE_VMETHOD_INTERPOSE` hooks on
+`viewscreen_dwarfmodest::render` and `viewscreen_dungeonmodest::render`,
+ensuring the virtual cursor is in place before each native render call.
+
+#### Input — SDL 2 event queue instead of SDL 1.2 direct calls
+
+The original plugin called SDL 1.2 key-injection APIs directly from the
+WebSocket thread.  This fork:
+
+- Translates browser key codes to a stable internal `SDL::Key` vocabulary in
+  `input.hpp` (matching the original mapping so `server.cpp` is unchanged).
+- Enqueues translated events onto a mutex-protected queue on the WebSocket
+  thread.
+- Drains the queue on the DF main thread in `plugin_onupdate` and pushes each
+  event as a proper SDL 2 event via `DFHack::DFSDL::DFSDL_PushEvent()`.
+
+This removes the data-race that existed when the old code called into DF
+state from a background thread.
+
+#### Viewscreens and globals
+
+Many viewscreens used by earlier forks (`viewscreen_layer_export_play_mapst`,
+etc.) were removed or renamed in DF v50.  Dead screen checks have been
+dropped; only viewscreens that still exist in 53.12 are referenced.
+`df::global::ui` was replaced by `df::global::plotinfo` throughout.
+
+#### Per-client independent cameras (new feature)
+
+Each connected client now carries its own `cam_x/y/z` viewport offset and a
+`has_own_cam` flag.  On the first camera-move opcode the plugin triggers an
+extra render pass for that client using its own viewport coordinates,
+producing an independent `own_sc` framebuffer that is delta-compressed and
+sent separately from the shared global frame.  This feature has no equivalent
+in any earlier fork.
+
 ### Compiling from Source ###
 
 Web Fortress is known to compile with 64-bit gcc/clang on Linux, and recent
