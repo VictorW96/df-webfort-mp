@@ -1050,12 +1050,17 @@ DFhackCExport command_result plugin_onupdate(color_ostream& /*out*/)
             *window_x += dx;
             *window_y += dy;
             *window_z += dz;
-            if (*window_x < 0) *window_x = 0;
-            if (*window_y < 0) *window_y = 0;
-            if (*window_z < 0) *window_z = 0;
+            if (*window_x < -30) *window_x = -30;
+            if (*window_y < -30) *window_y = -30;
+            if (*window_z < 0)   *window_z = 0;
             if (DFHack::Maps::IsValid()) {
                 uint32_t msx = 0, msy = 0, msz = 0;
                 DFHack::Maps::getSize(msx, msy, msz);
+                msx *= 16; msy *= 16;
+                int32_t vw = gps ? gps->dimx : 0;
+                int32_t vh = gps ? gps->dimy : 0;
+                if (*window_x > (int32_t)msx - vw + 30) *window_x = (int32_t)msx - vw + 30;
+                if (*window_y > (int32_t)msy - vh + 30) *window_y = (int32_t)msy - vh + 30;
                 if (msz > 0 && *window_z >= (int32_t)msz) *window_z = (int32_t)msz - 1;
             }
             // Force full re-send for the active player after a viewport shift.

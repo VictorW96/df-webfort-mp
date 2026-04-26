@@ -524,7 +524,24 @@ void tock(server* s, conn_hdl hdl)
     {
         uint8_t flags2 = 0;
         df::viewscreen* vs = DFHack::Gui::getCurViewscreen(true);
-        bool is_menu = !vs || !virtual_cast<df::viewscreen_dwarfmodest>(vs);
+        bool is_menu;
+        if (!vs || !virtual_cast<df::viewscreen_dwarfmodest>(vs)) {
+            // Not in dwarfmode at all: a DF sub-screen or DFHack ZScreen is open.
+            is_menu = true;
+        } else {
+            // In dwarfmode: only treat as "free camera" when the focus is idle
+            // ("dwarfmode/Default"). Any open sidebar panel, unit list, stocks,
+            // search box, etc. produces a different focus string and should keep
+            // WASD/scroll going to the game rather than the camera.
+            is_menu = true; // assume interactive until proven idle
+            auto focus = DFHack::Gui::getCurFocus(true);
+            for (const auto& f : focus) {
+                if (f == "dwarfmode/Default") {
+                    is_menu = false;
+                    break;
+                }
+            }
+        }
         flags2 |= is_menu ? 1 : 0;
         *(b++) = flags2;
     }
@@ -762,12 +779,17 @@ void on_message(server* s, conn_hdl hdl, message_ptr msg)
                 cl->cam_x += dx;
                 cl->cam_y += dy;
                 cl->cam_z += dz;
-                if (cl->cam_x < 0) cl->cam_x = 0;
-                if (cl->cam_y < 0) cl->cam_y = 0;
-                if (cl->cam_z < 0) cl->cam_z = 0;
+                if (cl->cam_x < -30) cl->cam_x = -30;
+                if (cl->cam_y < -30) cl->cam_y = -30;
+                if (cl->cam_z < 0)   cl->cam_z = 0;
                 if (DFHack::Maps::IsValid()) {
                     uint32_t map_sx = 0, map_sy = 0, map_sz = 0;
                     DFHack::Maps::getSize(map_sx, map_sy, map_sz);
+                    map_sx *= 16; map_sy *= 16;
+                    int32_t vw = gps ? gps->dimx : 0;
+                    int32_t vh = gps ? gps->dimy : 0;
+                    if (cl->cam_x > (int32_t)map_sx - vw + 30) cl->cam_x = (int32_t)map_sx - vw + 30;
+                    if (cl->cam_y > (int32_t)map_sy - vh + 30) cl->cam_y = (int32_t)map_sy - vh + 30;
                     if (map_sz > 0 && cl->cam_z >= (int32_t)map_sz)
                         cl->cam_z = (int32_t)map_sz - 1;
                 }
