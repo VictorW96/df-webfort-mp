@@ -14,9 +14,8 @@ To get a working copy:
 Then you can follow the usual
 [DFHack compiling process](https://docs.dfhack.org/en/stable/docs/dev/compile/Compile.html#how-to-get-the-code).
 
-Below are extra notes which you should probably read.
 
-### Linux (Ubuntu 22.04+, 64-bit) ###
+### Linux ###
 
 Install the standard DFHack build dependencies as documented upstream, then
 build with CMake and Ninja:

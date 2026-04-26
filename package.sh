@@ -1,42 +1,70 @@
 #!/bin/sh
-# Build script for windows, written in unix :P
+# Package script for Linux and Windows releases.
 # This file is a part of Web Fortress
-# (c) 2014 Kyle Mclamb <alloyed@tfwno.gf>
+#
+# Usage:
+#   ./package.sh [linux] [windows]
+#   ./package.sh          -- builds both
+#
+# Binaries are picked up from the standard CMake build directories:
+#   Linux   : ../../build/plugins/external/webfort/server/webfort.plug.so
+#   Windows : ../../build/win64-cross/output/webfort.plug.dll
 
-DF_VER="40.19"
+set -e
 
-if [ ! -r "$1" ]; then
-	echo "Invalid file: $1"
-	echo "Usage: $0 <Path to webfort.plug.dll>"
-	exit 1
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="$SCRIPT_DIR/../../build"
+
+LINUX_SO="$BUILD_DIR/plugins/external/webfort/server/webfort.plug.so"
+WIN_DLL="$BUILD_DIR/win64-cross/output/webfort.plug.dll"
+
+VERSION="$(git -C "$SCRIPT_DIR" describe --tags)"
+
+BUILD_LINUX=0
+BUILD_WINDOWS=0
+
+if [ $# -eq 0 ]; then
+	BUILD_LINUX=1
+	BUILD_WINDOWS=1
+else
+	for arg in "$@"; do
+		case "$arg" in
+			linux)   BUILD_LINUX=1 ;;
+			windows) BUILD_WINDOWS=1 ;;
+			*) echo "Unknown target: $arg"; echo "Usage: $0 [linux] [windows]"; exit 1 ;;
+		esac
+	done
 fi
 
-rm -rf package
-mkdir -v package
-mkdir -vp package/hack/plugins
+make_package() {
+	local binary="$1"
+	local zipname="$2"
 
-cp -v "$1" package/hack/plugins/
-cp -vr dist/shared/* package/
-cp -vr dist/$DF_VER/* package/
-cp -vr static package/web
+	if [ ! -r "$binary" ]; then
+		echo "Error: binary not found: $binary"
+		exit 1
+	fi
 
-cp_prefixed() {
-	cp -v $1 package/WF-$1
+	rm -rf package
+	mkdir -p package/hack/plugins
+	cp -v "$binary" package/hack/plugins/
+	cp -vr static package/web
+	cp -v README.md    package/WF-README.md
+	cp -v INSTALLING.txt package/WF-INSTALLING.txt
+	cp -v LICENSE      package/WF-LICENSE
+
+	rm -f "$zipname"
+	(cd package && zip -r "../$zipname" ./*)
+	rm -rf package
+	echo "$zipname: Done."
 }
 
-cp_prefixed README.md
-cp_prefixed INSTALLING.txt
-cp_prefixed LICENSE
-echo "## CLIENT ##"  >> package/WF-USING.txt
-cat static/README.md >> package/WF-USING.txt
-echo ""              >> package/WF-USING.txt
-echo "## SERVER ##"  >> package/WF-USING.txt
-cat server/README.md >> package/WF-USING.txt
+cd "$SCRIPT_DIR"
 
-zipname="webfort-$(git describe --tag)-df0.$DF_VER-win32.zip"
+if [ "$BUILD_LINUX" -eq 1 ]; then
+	make_package "$LINUX_SO" "webfort-${VERSION}-linux.zip"
+fi
 
-rm -v "$zipname"
-(cd package && zip -r "../$zipname" ./*)
-
-rm -rf package
-echo "$zipname: Done."
+if [ "$BUILD_WINDOWS" -eq 1 ]; then
+	make_package "$WIN_DLL" "webfort-${VERSION}-windows.zip"
+fi

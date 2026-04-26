@@ -1,13 +1,16 @@
 ## INSTALLING ##
 
-### FROM BINARY ###
+### FROM BINARY (Linux & Windows) ###
 
-If you received your copy of Webfort as a Windows binary, this is the procedure
-to follow.
+Pre-built binaries are available at:
 
-1. Installing the plugin.
+	https://github.com/VictorW96/df-webfort-mp/releases
 
-Web Fortress requires:
+Download the zip for your platform:
+* Linux : webfort-vX.Y.Z-linux.zip
+* Windows: webfort-vX.Y.Z-windows.zip
+
+Requirements:
 * Dwarf Fortress 53.x (the Steam release, v50+) or from the website
 * A matching version of DFHack for DF 53.x
 	https://github.com/dfhack/dfhack/releases
@@ -16,7 +19,11 @@ IMPORTANT: Web Fortress currently only supports ASCII graphics mode. Before
 enabling the plugin, make sure Dwarf Fortress is running with the classic ASCII
 renderer. Sprite graphics modes are not yet supported.
 
-Extract this zip file over your Dwarf Fortress install directory.
+1. Installing the plugin.
+
+Extract the zip file directly into your Dwarf Fortress install directory
+(the folder that contains the "hack" subfolder). On Linux this is typically
+~/.steam/steam/steamapps/common/Dwarf Fortress or the website download folder.
 
 To start Web Fortress, launch Dwarf Fortress and run the following command in
 the DFHack console:
@@ -29,12 +36,35 @@ You should see a line that says:
 
 If you see that, Web Fortress has been properly installed.
 
-2. Running the frontend
+2. Starting the Browser
 
-Web Fortress includes its own built-in HTTP server. Once the plugin is running,
-open a browser and navigate to:
+Once the plugin is running, open a browser and navigate to:
 
 	http://localhost:1234/webfort.html
+
+The URL accepts optional query parameters:
+
+  nick=<name>      Your display name shown to other players
+  secret=<pass>    Password if the server requires one
+  host=<address>   Server address (default: current hostname)
+  port=<number>    Server port (default: 1234)
+  tiles=<file>     Tileset image for map tiles
+  text=<file>      Tileset image for text
+  colors=<name>    Colour scheme from the web/colors/ folder
+  show-fps         Show the FPS counter (no value needed)
+
+Example to connect to a remote host with a nickname:
+
+	http://your-ip:1234/webfort.html?nick=Alice&colors=VheridDusk.json
+
+Example using the Phoebus tileset:
+
+	http://localhost:1234/webfort.html?tiles=Phoebus.png&text=t_Phoebus.png
+
+Available tilesets (in the web/art/ folder): Curses, Phoebus, Mayday, Spacefox,
+Ironhand, Obsidian, SimpleMood, ShizzleClean and more.
+The classic tilesets (Phoebus, Mayday, etc.) 
+work identically in v50+ ASCII mode as in older versions.
 
 To allow remote players to connect, replace `localhost` with your public IP
 address. Your IP can be found by typing "What is my IP Address" into Google.
