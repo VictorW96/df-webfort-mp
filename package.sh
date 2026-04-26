@@ -13,10 +13,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/../../build"
+BUILD_DIR="$SCRIPT_DIR/../../../build"
 
 LINUX_SO="$BUILD_DIR/plugins/external/webfort/server/webfort.plug.so"
-WIN_DLL="$BUILD_DIR/win64-cross/output/webfort.plug.dll"
+WIN_DLL="$BUILD_DIR/win64-cross/output/hack/plugins/webfort.plug.dll"
 
 VERSION="$(git -C "$SCRIPT_DIR" describe --tags)"
 
@@ -47,8 +47,9 @@ make_package() {
 
 	rm -rf package
 	mkdir -p package/hack/plugins
+	mkdir -p package/hack/webfort
 	cp -v "$binary" package/hack/plugins/
-	cp -vr static package/web
+	cp -vr static package/hack/webfort/static
 	cp -v README.md    package/WF-README.md
 	cp -v INSTALLING.txt package/WF-INSTALLING.txt
 	cp -v LICENSE      package/WF-LICENSE
